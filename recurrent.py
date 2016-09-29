@@ -96,4 +96,3 @@ class lstm(object):
 
 
 
-

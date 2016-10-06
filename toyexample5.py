@@ -19,12 +19,11 @@ from collections import OrderedDict
 # Make some simple recursive data
 # -----------------------------------------------------------------------------
 
-n_in = 5
-n_hidden = 11
-n_out = 4
-sequence_length = 120
-n_examples = 10000
-dependency = 10 # artificially introduce long-term dependencies
+n_in = 256
+n_hidden = 512
+n_out = 10
+sequence_length = 333
+n_examples = 1000
 truncate = 1 # truncate BPTT
 
 rng = numpy.random.RandomState(1)
@@ -39,23 +38,26 @@ def ortho_weight(ndim,rng):
     return u.astype('float32')
 y_train = numpy.zeros((n_examples,sequence_length,n_out),dtype='float32')
 Wx_true = rng.uniform(low=-0.1,high=0.1,size=(n_in,n_hidden)).astype('float32')
-Wr1_true = rng.uniform(low=-0.1,high=0.1,size=(n_hidden,n_hidden)).astype('float32')
-Wr2_true = ortho_weight(n_hidden,rng)
+Wh_true = rng.uniform(low=-0.1,high=0.1,size=(n_hidden,n_hidden)).astype('float32')
 bh_true = rng.uniform(low=0,high=0.1,size=(n_hidden)).astype('float32')
 Wy_true = rng.uniform(low=-0.1,high=0.1,size=(n_hidden,n_out)).astype('float32')
 by_true = rng.uniform(low=-0.02,high=0.1,size=(n_out)).astype('float32')
-h = numpy.zeros((dependency+1,n_examples,n_hidden),dtype='float32')
+h_tm1 = numpy.zeros((n_hidden),dtype='float32')
 def np_relu(x):
     return numpy.maximum(numpy.zeros_like(x),x)
 for t in range(x_train.shape[1]):
-    # roll the memory back
-    h[1:] = h[:-1]
-    h[0] = np_relu(numpy.dot(x_train[:,t,:],Wx_true) \
-               +0.5*(numpy.dot(h[1],Wr1_true)+numpy.dot(h[-1],Wr2_true)) \
-               +bh_true)
-    noise = rng.normal(loc=0.,scale=0.01,size=(n_out,))
-    y_train[:,t,:] = np_relu(numpy.dot(h[0],Wy_true)+by_true+noise)
-
+    h = np_relu(numpy.dot(x_train[:,t,:],Wx_true) \
+        +numpy.dot(h_tm1,Wh_true)+bh_true)
+    h_tm1 = h
+    # artificially introduce long-term dependencies
+    y_train[:,t,:] = 0.25*np_relu(numpy.dot(h[0],Wy_true)+by_true) \
+                     +0.25*y_train[:,t-7,:] \
+                     +0.25*y_train[:,t-11,:] \
+                     +0.25*y_train[:,t-23,:]
+noise = rng.normal(loc=0.,
+                   scale=0.1*numpy.std(y_train),
+                   size=(n_examples,sequence_length,n_out))
+y_train += noise
 
 
 # -----------------------------------------------------------------------------
@@ -82,8 +84,8 @@ def _zero_bias(n):
 
 run = 'dni'
 batch_size = 100
-lr = 1e-4
-n_epochs = 500
+lr = 1e-3
+n_epochs = 1000
 
 x = T.tensor3('x')
 y = T.tensor3('y')
@@ -160,8 +162,6 @@ if run=='bptt':
 
 elif run=='dni':
     
-    lr = 1e-7
-    
     class dni(object):
         def __init__(self,n_feat,n_layers,rng=rng):
             """
@@ -223,11 +223,9 @@ elif run=='dni':
                 # Train the RNN: backprop (loss + DNI output)
                 loss = T.mean(T.square(yo_t-y_t))
                 dni_out = self.dni.output(h_t)
-#                for param in self.params:
-                for param in [self.Wx,self.bh,self.Wy,self.by,self.Wh]:
+                for param in self.params:
                     dlossdparam = T.grad(loss,param)
                     dniJ = T.Lop(h_t,param,dni_out,disconnected_inputs='ignore')
-                    J = dniJ
                     updates[param] = param-lr*T.switch(T.gt(switch,0),
                                                        dlossdparam+dniJ,
                                                        dlossdparam)
@@ -244,9 +242,9 @@ elif run=='dni':
                     gparam = T.grad(dni_error,param)
                     updates[param] = param-lr*gparam
                 
-                return [h_t,loss,J],updates
+                return [h_t,loss,dni_error],updates
             h0 = T.zeros((n_hidden,),dtype=theano.config.floatX)
-            [h,seq_loss,J_out],updates = theano.scan(fn=step, 
+            [h,seq_loss,dni_error_out],updates = theano.scan(fn=step, 
                                  sequences=[x.dimshuffle([1,0,2]),
                                             y.dimshuffle([1,0,2])],
                                  outputs_info=[T.alloc(h0,x.shape[0],n_hidden),
@@ -255,23 +253,28 @@ elif run=='dni':
                                                 self.Wy,self.by,
                                                 learning_rate,dni_switch])
             return theano.function(inputs=[x,y,learning_rate,dni_switch],
-                                   outputs=[T.mean(seq_loss),J_out],
+                                   outputs=[T.mean(seq_loss),
+                                            T.mean(dni_error_out)],
                                    updates=updates)
     
-    model = rnn_dni(n_in,n_hidden,n_out)
-    train = model.train()
-    for epoch in range(n_epochs):
-        if epoch>0:
-            dni_on = 1
-        else:
-            dni_on = 0
-        loss = 0
-        for batch in range(int(numpy.floor(n_examples/batch_size))):
-            x_batch = x_train[batch*batch_size:(batch+1)*batch_size]
-            y_batch = y_train[batch*batch_size:(batch+1)*batch_size]
-            loss,debugJ = train(x_batch,y_batch,lr,dni_on)
-#            print(debugJ)
-        print('Epoch %d loss: %f' % (epoch,loss))
+    final = []
+    for dni_on in [0,1]:
+        model = rnn_dni(n_in,n_hidden,n_out)
+        train = model.train()
+        for epoch in range(n_epochs):
+            loss = 0
+            dni_err = 0
+            for batch in range(int(numpy.floor(n_examples/batch_size))):
+                x_batch = x_train[batch*batch_size:(batch+1)*batch_size]
+                y_batch = y_train[batch*batch_size:(batch+1)*batch_size]
+                loss_batch,dni_err_batch = train(x_batch,y_batch,lr,dni_on)
+                loss += loss_batch
+                dni_err += dni_err_batch
+            print('Epoch %d loss: %f  -----  DNI error: %f' % (epoch,loss,dni_err))
+        final.append(loss)
+    print('Final results:')
+    print('w/o dni: %f' % final[0])
+    print('w/ dni:  %f' % final[1])
 
 
 

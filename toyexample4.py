@@ -2,8 +2,7 @@
 """
 Created on Thu Sep 29 10:54:16 2016
 
-Try synthetic gradients on a simple example
-
+Try synthetic gradients w/ stepsize of 1, then go back and finish toyexample4
 @author: jrbtaylor
 """
 
@@ -20,11 +19,13 @@ from collections import OrderedDict
 # Make some simple recursive data
 # -----------------------------------------------------------------------------
 
-n_in = 5
-n_hidden = 10
-n_out = 3
-sequence_length = 20
-n_examples = 100000
+n_in = 256
+n_hidden = 512
+n_out = 10
+sequence_length = 333
+n_examples = 1000
+truncate = 3 # truncate BPTT
+
 rng = numpy.random.RandomState(1)
 # inputs are vectors of uniform random numbers
 x_train = rng.uniform(low=-1,high=1,
@@ -37,24 +38,30 @@ def ortho_weight(ndim,rng):
     return u.astype('float32')
 y_train = numpy.zeros((n_examples,sequence_length,n_out),dtype='float32')
 Wx_true = rng.uniform(low=-0.1,high=0.1,size=(n_in,n_hidden)).astype('float32')
-Wr_true = ortho_weight(n_hidden,rng)
+Wh_true = rng.uniform(low=-0.1,high=0.1,size=(n_hidden,n_hidden)).astype('float32')
 bh_true = rng.uniform(low=0,high=0.1,size=(n_hidden)).astype('float32')
 Wy_true = rng.uniform(low=-0.1,high=0.1,size=(n_hidden,n_out)).astype('float32')
 by_true = rng.uniform(low=-0.02,high=0.1,size=(n_out)).astype('float32')
-h = numpy.zeros((n_examples,n_hidden),dtype='float32')
+h_tm1 = numpy.zeros((n_hidden),dtype='float32')
 def np_relu(x):
     return numpy.maximum(numpy.zeros_like(x),x)
 for t in range(x_train.shape[1]):
     h = np_relu(numpy.dot(x_train[:,t,:],Wx_true) \
-               +numpy.dot(h,Wr_true)+bh_true)
-    noise = rng.normal(loc=0.,scale=0.01,size=(n_out,))
-    y_train[:,t,:] = np_relu(numpy.dot(h,Wy_true)+by_true+noise)
-x_train = theano.shared(x_train)
-y_train = theano.shared(y_train)
+        +numpy.dot(h_tm1,Wh_true)+bh_true)
+    h_tm1 = h
+    # artificially introduce long-term dependencies
+    y_train[:,t,:] = 0.25*np_relu(numpy.dot(h[0],Wy_true)+by_true) \
+                     +0.25*y_train[:,t-7,:] \
+                     +0.25*y_train[:,t-11,:] \
+                     +0.25*y_train[:,t-23,:]
+noise = rng.normal(loc=0.,
+                   scale=0.1*numpy.std(y_train),
+                   size=(n_examples,sequence_length,n_out))
+y_train += noise
 
 
 # -----------------------------------------------------------------------------
-# Vanilla-RNN model
+# RNN helper functions
 # -----------------------------------------------------------------------------
 
 def _uniform_weight(n1,n2,rng=rng):
@@ -75,59 +82,62 @@ def _zero_bias(n):
     return theano.shared(numpy.zeros((n,),dtype=theano.config.floatX),
                          borrow=True)
 
-class rnn(object):
-    def __init__(self,x,n_in,n_hidden,n_out,rng=rng):
-        """
-        Initialize a basic single-layer RNN
-        
-        x:    symbolic input tensor
-        n_in:    input dimensionality
-        n_hidden:    # of hidden units
-        hidden_activation:    non-linearity at hidden units (e.g. relu)
-        n_out:    # of output units
-        output_activation:    non-linearity at output units (e.g. softmax)
-        """
-        self.Wx = _uniform_weight(n_in,n_hidden,rng)
-        self.Wh = _ortho_weight(n_hidden,rng)
-        self.Wy = _uniform_weight(n_hidden,n_out,rng)
-        self.bh = _zero_bias(n_hidden)
-        self.by = _zero_bias(n_out)
-        self.params = [self.Wx,self.Wh,self.Wy,self.bh,self.by]
-        
-        def step(x_t,h_tm1,Wx,Wh,Wy,bh,by):
-            h_t = relu(T.dot(x_t,Wx)+T.dot(h_tm1,Wh)+bh)
-            y_t = relu(T.dot(h_t,Wy)+by)
-            return [h_t,y_t]
-        h0 = T.zeros((n_hidden,),dtype=theano.config.floatX)
-        ([h,self.output],_) = theano.scan(fn=step, 
-                                sequences=x.dimshuffle([1,0,2]),
-                                outputs_info=[T.alloc(h0,x.shape[0],n_hidden),
-                                              None],
-                                non_sequences=[self.Wx,self.Wh,self.Wy,
-                                               self.bh,self.by],
-                                strict=True)
-        self.orthogonality = T.sum(T.sqr(T.dot(self.Wh,self.Wh.T)-T.identity_like(self.Wh)))
-    def square_error(self,y):
-        return T.mean(T.square(self.output-y.dimshuffle([1,0,2])),axis=(1,2))
-    def mse(self,y):
-        return T.mean(self.square_error(y))
+run = 'dni'
+batch_size = 100
+lr = 1e-3
+n_epochs = 1000
 
 x = T.tensor3('x')
 y = T.tensor3('y')
-model = rnn(x,n_in,n_hidden,n_out)
-
 index = T.lscalar()  # index to a [mini]batch
-batch_size = 100
-lr = 1e-4
-n_epochs = 500
 
-run = 'synth'
 
 # -----------------------------------------------------------------------------
-# Classic SGD
+# Classic Backprop
 # -----------------------------------------------------------------------------
 
-if run=='sgd':
+if run=='bptt':
+    x_train = theano.shared(x_train)
+    y_train = theano.shared(y_train)
+    
+    class rnn(object):
+        def __init__(self,x,n_in,n_hidden,n_out,steps,rng=rng):
+            """
+            Initialize a basic single-layer RNN
+            
+            x:    symbolic input tensor
+            n_in:    input dimensionality
+            n_hidden:    # of hidden units
+            hidden_activation:    non-linearity at hidden units (e.g. relu)
+            n_out:    # of output units
+            steps:    # of time steps to truncate BPTT at
+            """
+            self.Wx = _uniform_weight(n_in,n_hidden,rng)
+            self.Wh = _ortho_weight(n_hidden,rng)
+            self.Wy = _uniform_weight(n_hidden,n_out,rng)
+            self.bh = _zero_bias(n_hidden)
+            self.by = _zero_bias(n_out)
+            self.params = [self.Wx,self.Wh,self.Wy,self.bh,self.by]
+            
+            def step(x_t,h_tm1,Wx,Wh,Wy,bh,by):
+                h_t = relu(T.dot(x_t,Wx)+T.dot(h_tm1,Wh)+bh)
+                y_t = relu(T.dot(h_t,Wy)+by)
+                return [h_t,y_t]
+            h0 = T.zeros((n_hidden,),dtype=theano.config.floatX)
+            ([h,self.output],_) = theano.scan(fn=step, 
+                                    sequences=x.dimshuffle([1,0,2]),
+                                    outputs_info=[T.alloc(h0,x.shape[0],n_hidden),
+                                                  None],
+                                    non_sequences=[self.Wx,self.Wh,self.Wy,
+                                                   self.bh,self.by],
+                                    strict=True,
+                                    truncate_gradient=steps)
+            self.orthogonality = T.sum(T.sqr(T.dot(self.Wh,self.Wh.T)-T.identity_like(self.Wh)))
+        def square_error(self,y):
+            return T.mean(T.square(self.output-y.dimshuffle([1,0,2])),axis=(1,2))
+        def mse(self,y):
+            return T.mean(self.square_error(y))
+    model = rnn(x,n_in,n_hidden,n_out,truncate)    
     cost = model.mse(y)
     gparams = T.grad(cost,model.params)
     updates = OrderedDict()
@@ -143,35 +153,147 @@ if run=='sgd':
         loss = 0
         for batch in range(int(numpy.floor(n_examples/batch_size))):
             loss = train(batch)
-            print(loss.shape)
         print('Epoch %d loss: %f' % (epoch,loss))
 
 
 # -----------------------------------------------------------------------------
-# SGD w/ eligiblity trace scaling
+# Synthetic Gradient
 # -----------------------------------------------------------------------------
 
-elif run=='synth':
+elif run=='dni':
     
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    class dni(object):
+        def __init__(self,n_feat,n_layers,rng=rng):
+            """
+            Simple fully-connected neural net
+            """
+            self.n_feat = n_feat
+            self.n_layers = n_layers
+            self.W = []
+            self.b = []
+            self.params = []
+            for n in range(n_layers):
+                if n<n_layers-1:
+                    W = _ortho_weight(n_feat,rng)
+                else: # last layer weights should be zero to not wreck shit
+                    W = theano.shared(numpy.zeros((n_feat,n_feat),
+                                                  dtype=theano.config.floatX),
+                                                  borrow=True)
+                self.W.append(W)
+                self.params.append(W)
+                b = _zero_bias(n_feat)
+                self.b.append(b)
+                self.params.append(b)
+        
+        def output(self,x):
+            next_input = x
+            for n in range(self.n_layers):
+                next_input = relu(T.dot(next_input,self.W[n])+self.b[n])
+            return next_input
+    
+    class rnn_dni(object):
+        def __init__(self,n_in,n_hidden,n_out,steps,rng=rng):
+            """
+            Build a simple RNN with a DNI every 'steps' timesteps
+            """
+            self.n_in = n_in
+            self.n_hidden = n_hidden
+            self.n_out = n_out
+            self.steps = steps
+            
+            self.Wx = _uniform_weight(n_in,n_hidden)
+            self.Wh = _ortho_weight(n_hidden)
+            self.bh = _zero_bias(n_hidden)
+            self.Wy = _uniform_weight(n_hidden,n_out)
+            self.by = _zero_bias(n_out)
+            self.params = [self.Wx,self.Wh,self.bh,self.Wy,self.by]
+            
+            self.dni = dni(n_hidden,2)
+            
+        def train(self):
+            x = T.tensor3('x')
+            y = T.tensor3('y')
+            learning_rate = T.scalar('learning_rate')
+            dni_switch = T.scalar('dni_switch')
+            
+            # reshape the inputs
+            # batch x time x n -> time//steps x steps x batch x n
+            def shufflereshape(r):
+                r = r.dimshuffle([1,0,2])
+                r = r.reshape((r.shape[0]//self.steps,
+                               self.steps,
+                               r.shape[1],
+                               r.shape[2]))
+                return r
+            
+            # step takes a set of inputs over self.steps time-steps
+            def step(x_t,y_t,h_tm1,Wx,Wh,bh,Wy,by,lr,switch):
+                
+                # manually build the graph for the inner loop...
+                # passing correct h_tm1 is impossible in nested scans
+                yo_t = []
+                for t in range(self.steps):
+                    h_t = relu(T.dot(x_t[t],Wx)+T.dot(h_tm1,Wh)+bh)
+                    yo_t.append(relu(T.dot(h_t,Wy)+by))
+                    h_tm1 = h_t
+                
+                updates = OrderedDict()
+                
+                # Train the RNN: backprop (loss + DNI output)
+                loss = T.mean(T.square(yo_t-y_t))
+                dni_out = self.dni.output(h_t)
+                for param in self.params:
+                    dlossdparam = T.grad(loss,param)
+                    dniJ = T.Lop(h_t,param,dni_out,disconnected_inputs='ignore')
+                    updates[param] = param-lr*T.switch(T.gt(switch,0),
+                                                       dlossdparam+dniJ,
+                                                       dlossdparam)
+                                
+                # Update the DNI (from the last step)
+                # re-calculate the DNI prediction from the last step
+                # note: can't be passed through scan or T.grad won't work
+                dni_out_old = self.dni.output(h_tm1)
+                # dni_target: current loss backprop'ed + new dni backprop'ed
+                dni_target = T.grad(loss,h_tm1) \
+                             +T.Lop(h_t,h_tm1,dni_out)
+                dni_error = T.sum(T.square(dni_out_old-dni_target))
+                for param in self.dni.params:
+                    gparam = T.grad(dni_error,param)
+                    updates[param] = param-lr*gparam
+                
+                return [h_t,loss,dni_error],updates
+            h0 = T.zeros((n_hidden,),dtype=theano.config.floatX)
+            [h,seq_loss,dni_error_out],updates = theano.scan(fn=step, 
+                                 sequences=[shufflereshape(x),
+                                            shufflereshape(y)],
+                                 outputs_info=[T.alloc(h0,x.shape[0],n_hidden),
+                                               None,None],
+                                 non_sequences=[self.Wx,self.Wh,self.bh,
+                                                self.Wy,self.by,
+                                                learning_rate,dni_switch])
+            return theano.function(inputs=[x,y,learning_rate,dni_switch],
+                                   outputs=[T.mean(seq_loss),
+                                            T.mean(dni_error_out)],
+                                   updates=updates)
+    
+    final = []
+    for dni_on in [0,1]:
+        model = rnn_dni(n_in,n_hidden,n_out,truncate)
+        train = model.train()
+        for epoch in range(n_epochs):
+            loss = 0
+            dni_err = 0
+            for batch in range(int(numpy.floor(n_examples/batch_size))):
+                x_batch = x_train[batch*batch_size:(batch+1)*batch_size]
+                y_batch = y_train[batch*batch_size:(batch+1)*batch_size]
+                loss_batch,dni_err_batch = train(x_batch,y_batch,lr,dni_on)
+                loss += loss_batch
+                dni_err += dni_err_batch
+            print('Epoch %d loss: %f  -----  DNI error: %f' % (epoch,loss,dni_err))
+        final.append(loss)
+    print('Final results:')
+    print('w/o dni: %f' % final[0])
+    print('w/ dni:  %f' % final[1])
 
 
 

@@ -130,6 +130,14 @@ class dni(object):
                 b = const_bias(n_out,0)
                 self.b.append(b)
                 self.params.append(b)
+            
+            # Initialize momentum
+            self.gparams_mom = []
+            for param in self.params:
+                gparam_mom = theano.shared(
+                                 numpy.zeros(param.get_value(borrow=True).shape,
+                                 dtype=theano.config.floatX))
+                self.gparams_mom.append(gparam_mom)
         
         def output(self,x):
             next_input = x
@@ -142,11 +150,13 @@ class rnn_dni(object):
         """
         Build a simple RNN with a DNI every 'steps' timesteps
         """
+        # parameters
         self.n_in = n_in
         self.n_hidden = n_hidden
         self.n_out = n_out
         self.steps = steps
         
+        # initialize weights
         self.Wx = uniform_weight(n_in,n_hidden)
         self.Wh = ortho_weight(n_hidden)
         self.bh = const_bias(n_hidden,0)
@@ -154,12 +164,22 @@ class rnn_dni(object):
         self.by = const_bias(n_out,0)
         self.params = [self.Wx,self.Wh,self.bh,self.Wy,self.by]
         
+        # Initialize momentum
+        self.gparams_mom = []
+        for param in self.params:
+            gparam_mom = theano.shared(
+                             numpy.zeros(param.get_value(borrow=True).shape,
+                             dtype=theano.config.floatX))
+            self.gparams_mom.append(gparam_mom)
+        
+        # initialize DNI
         self.dni = dni(n_hidden,n_hidden,2)
         
     def train(self):
         x = T.tensor3('x')
         y = T.tensor3('y')
         learning_rate = T.scalar('learning_rate')
+        momentum = T.scalar('momentum')
         dni_scale = T.scalar('dni_scale')
         
         # reshape the inputs
@@ -173,7 +193,7 @@ class rnn_dni(object):
             return r
         
         # step takes a set of inputs over self.steps time-steps
-        def step(x_t,y_t,h_tmT,Wx,Wh,bh,Wy,by,lr,scale):
+        def step(x_t,y_t,h_tmT,Wx,Wh,bh,Wy,by,lr,momentum,scale):
             
             # manually build the graph for the inner loop...
             # passing correct h_tm1 is impossible in nested scans
@@ -190,12 +210,14 @@ class rnn_dni(object):
             # Train the RNN: backprop (loss + DNI output)
             loss = T.mean(T.square(yo_t-y_t))
             dni_out = self.dni.output(h_t)
-            for param in self.params:
+            for [param,gparam_mom] in zip(self.params,self.gparams_mom):
                 dlossdparam = T.grad(loss,param)
                 dniJ = T.Lop(h_t,param,dni_out,disconnected_inputs='ignore')
                 up_dldp_l2 += T.sum(T.square(dlossdparam))
                 up_dni_l2 += T.sum(T.square(dniJ))
-                updates[param] = param-lr*(dlossdparam+scale*dniJ)
+                updates[gparam_mom] = momentum*gparam_mom \
+                                      -(1.-momentum)*lr*(dlossdparam+scale*dniJ)
+                updates[param] = param+updates[gparam_mom]
                 
             # Update the DNI (from the last step)
             # re-calculate the DNI prediction from the last step
@@ -205,9 +227,19 @@ class rnn_dni(object):
             dni_target = T.grad(loss,h_tmT) \
                          +T.Lop(h_t,h_tmT,dni_out)
             dni_error = T.sum(T.square(dni_out_old-dni_target))
-            for param in self.dni.params:
+            for [param,gparam_mom] in zip(self.dni.params,self.dni.gparams_mom):
                 gparam = T.grad(dni_error,param)
-                updates[param] = param-lr*gparam
+                updates[gparam_mom] = momentum*gparam_mom \
+                                      -(1.-momentum)*lr*gparam
+                updates[param] = param+updates[gparam_mom]
+                
+            # Momentum update
+#            for gparam_mom, gparam in zip(gparams_mom,gparams):
+#                updates[gparam_mom] = momentum*gparam_mom \
+#                                      -(1.-momentum)*learning_rate*gparam
+#            # Parameter update
+#            for param,gparam_mom in zip(model.params,gparams_mom):
+#                updates[param] = param+updates[gparam_mom]
             
             return [h_t,loss,dni_error,T.sqrt(up_dldp_l2),T.sqrt(up_dni_l2)],updates
         h0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
@@ -218,8 +250,8 @@ class rnn_dni(object):
                                            None,None,None,None],
                              non_sequences=[self.Wx,self.Wh,self.bh,
                                             self.Wy,self.by,
-                                            learning_rate,dni_scale])
-        return theano.function(inputs=[x,y,learning_rate,dni_scale],
+                                            learning_rate,momentum,dni_scale])
+        return theano.function(inputs=[x,y,learning_rate,momentum,dni_scale],
                                outputs=[T.mean(seq_loss),
                                         T.mean(seq_dni_error),
                                         T.mean(up_dldp),

@@ -16,39 +16,17 @@ import timeit
 import recurrent
 
 # -----------------------------------------------------------------------------
-# Make some simple recursive data
+# Simple recall data
 # -----------------------------------------------------------------------------
 
-def data(n_in,n_hidden,n_out,n_train,n_val,sequence_length,period):
+def data(n_in,n_train,n_val,sequence_length,delay):
     rng = numpy.random.RandomState(1)
-    # generate data from a pre-fixed RNN + noise
-    def ortho_weight(ndim,rng):
-        W = rng.randn(ndim, ndim)
-        u, s, v = numpy.linalg.svd(W)
-        return u.astype('float32')
-    Wx_true = rng.uniform(low=-0.1,high=0.1,size=(n_in,n_hidden)).astype('float32')
-    Wh_true = rng.uniform(low=-0.1,high=0.1,size=(n_hidden,n_hidden)).astype('float32')
-    bh_true = rng.uniform(low=0,high=0.1,size=(n_hidden)).astype('float32')
-    Wy_true = rng.uniform(low=-0.1,high=0.1,size=(n_hidden,n_out)).astype('float32')
-    by_true = rng.uniform(low=-0.02,high=0.1,size=(n_out)).astype('float32')
-    def np_relu(x):
-        return numpy.maximum(numpy.zeros_like(x),x)
     def generate_data(examples):
-        x = rng.uniform(low=-1,high=1,
+        x = rng.uniform(low=0,high=1,
                         size=(examples,sequence_length,n_in)).astype('float32')
-        y = numpy.zeros((x.shape[0],sequence_length,n_out),dtype='float32')
-        h_tm1 = numpy.zeros((n_hidden),dtype='float32')
+        y = numpy.zeros((x.shape[0],sequence_length,n_in),dtype='float32')
         for t in range(sequence_length):
-            h = np_relu(numpy.dot(x[:,t,:],Wx_true) \
-                +numpy.dot(h_tm1,Wh_true)+bh_true)
-            h_tm1 = h
-            # artificially introduce long-term dependencies
-            y[:,t,:] = 0.5*np_relu(numpy.dot(h[0],Wy_true)+by_true) \
-                       +0.5*y[:,t-period,:]
-        noise = rng.normal(loc=0.,
-                           scale=0.1*numpy.std(y),
-                           size=(x.shape[0],sequence_length,n_out))
-        y += noise
+            y[:,t,:] = x[:,t-delay,:]
         return x,y
     x_train,y_train = generate_data(n_train)
     x_val,y_val = generate_data(n_val)
@@ -114,7 +92,7 @@ def experiment(train_fcn,x_train,y_train,lr,lr_decay,batch_size,
         val_loss.append(val_loss_epoch)
         
         # early stopping
-        if val_loss_epoch<best_val:
+        if val_loss_epoch<0.995*best_val:
             best_val = val_loss_epoch
             patience = init_patience
         else:
@@ -128,9 +106,9 @@ def experiment(train_fcn,x_train,y_train,lr,lr_decay,batch_size,
 
 def test_dni(x_train,y_train,x_val,y_val,
              n_in,n_hidden,n_out,steps,dni_scale,
-             lr,lr_decay,batch_size,n_epochs,patience):
+             lr,lr_decay,momentum,batch_size,n_epochs,patience):
     model = recurrent.rnn_dni(n_in,n_hidden,n_out,steps)
-    train = lambda x,y,l: model.train()(x,y,l,dni_scale)
+    train = lambda x,y,l: model.train()(x,y,l,momentum,dni_scale)
     test = model.test()
     return experiment(train,x_train,y_train,lr,lr_decay,batch_size,
                       test,x_val,y_val,n_epochs,patience)
@@ -138,25 +116,26 @@ def test_dni(x_train,y_train,x_val,y_val,
 
 if __name__ == "__main__":
     # make some data
-    n_in = 256
-    n_hidden = 512
-    n_out = 10
-    sequence_length = 555
+    n_in = 32
+    sequence_length = 444
     n_train = 1000
     n_val = 100
-    steps = 5
-    period = 6
-    x_train,y_train,x_val,y_val = data(n_in,n_hidden,n_out,n_train,n_val,
-                                       sequence_length,period)
+    delay = 3
+    x_train,y_train,x_val,y_val = data(n_in,n_train,n_val,
+                                       sequence_length,delay)
     # test dni
+    steps = 2 # between DNIs
     dni_scale = 1
-    lr = 1e-2
+    lr = 1e-3
     lr_decay = 0.99
+    momentum = 0.9
     n_epochs = 1000
     patience = 20
     batch_size = 100
+    n_hidden = 2*n_in
+    n_out = n_in
     test_dni(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,steps,dni_scale,
-             lr,lr_decay,batch_size,n_epochs,patience)
+             lr,lr_decay,momentum,batch_size,n_epochs,patience)
 
 
 

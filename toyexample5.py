@@ -3,6 +3,7 @@
 Created on Thu Sep 29 10:54:16 2016
 
 Try synthetic gradients w/ stepsize of 1, then go back and finish toyexample4
+
 @author: jrbtaylor
 """
 
@@ -22,7 +23,7 @@ from collections import OrderedDict
 n_in = 256
 n_hidden = 512
 n_out = 10
-sequence_length = 333
+sequence_length = 335
 n_examples = 1000
 truncate = 1 # truncate BPTT
 
@@ -50,10 +51,8 @@ for t in range(x_train.shape[1]):
         +numpy.dot(h_tm1,Wh_true)+bh_true)
     h_tm1 = h
     # artificially introduce long-term dependencies
-    y_train[:,t,:] = 0.25*np_relu(numpy.dot(h[0],Wy_true)+by_true) \
-                     +0.25*y_train[:,t-7,:] \
-                     +0.25*y_train[:,t-11,:] \
-                     +0.25*y_train[:,t-23,:]
+    y_train[:,t,:] = 0.5*np_relu(numpy.dot(h[0],Wy_true)+by_true) \
+                     +0.5*y_train[:,t-10,:]
 noise = rng.normal(loc=0.,
                    scale=0.1*numpy.std(y_train),
                    size=(n_examples,sequence_length,n_out))
@@ -175,7 +174,7 @@ elif run=='dni':
             for n in range(n_layers):
                 if n<n_layers-1:
                     W = _ortho_weight(n_feat,rng)
-                else: # last layer weights should be zero to not wreck shit
+                else: # last layer weights should be zero to not wreck things
                     W = theano.shared(numpy.zeros((n_feat,n_feat),
                                                   dtype=theano.config.floatX),
                                                   borrow=True)

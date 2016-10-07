@@ -2,7 +2,8 @@
 """
 Created on Thu Sep 29 10:54:16 2016
 
-Try synthetic gradients w/ stepsize of 1, then go back and finish toyexample4
+Synthetic gradients with arbitrary # of time-steps between DNIs
+
 @author: jrbtaylor
 """
 
@@ -22,9 +23,12 @@ from collections import OrderedDict
 n_in = 256
 n_hidden = 512
 n_out = 10
-sequence_length = 333
+sequence_length = 335
 n_examples = 1000
-truncate = 3 # truncate BPTT
+truncate = 5 # truncate BPTT
+dependency = 6
+# sequence length must be divisible by truncate, otherwise can't reshape
+assert(sequence_length%truncate==0)
 
 rng = numpy.random.RandomState(1)
 # inputs are vectors of uniform random numbers
@@ -50,10 +54,8 @@ for t in range(x_train.shape[1]):
         +numpy.dot(h_tm1,Wh_true)+bh_true)
     h_tm1 = h
     # artificially introduce long-term dependencies
-    y_train[:,t,:] = 0.25*np_relu(numpy.dot(h[0],Wy_true)+by_true) \
-                     +0.25*y_train[:,t-7,:] \
-                     +0.25*y_train[:,t-11,:] \
-                     +0.25*y_train[:,t-23,:]
+    y_train[:,t,:] = 0.5*np_relu(numpy.dot(h[0],Wy_true)+by_true) \
+                     +0.5*y_train[:,t-dependency,:]
 noise = rng.normal(loc=0.,
                    scale=0.1*numpy.std(y_train),
                    size=(n_examples,sequence_length,n_out))
@@ -175,7 +177,7 @@ elif run=='dni':
             for n in range(n_layers):
                 if n<n_layers-1:
                     W = _ortho_weight(n_feat,rng)
-                else: # last layer weights should be zero to not wreck shit
+                else: # last layer weights should be zero to not wreck things
                     W = theano.shared(numpy.zeros((n_feat,n_feat),
                                                   dtype=theano.config.floatX),
                                                   borrow=True)
@@ -227,11 +229,12 @@ elif run=='dni':
                 return r
             
             # step takes a set of inputs over self.steps time-steps
-            def step(x_t,y_t,h_tm1,Wx,Wh,bh,Wy,by,lr,switch):
+            def step(x_t,y_t,h_tmT,Wx,Wh,bh,Wy,by,lr,switch):
                 
                 # manually build the graph for the inner loop...
                 # passing correct h_tm1 is impossible in nested scans
                 yo_t = []
+                h_tm1 = h_tmT
                 for t in range(self.steps):
                     h_t = relu(T.dot(x_t[t],Wx)+T.dot(h_tm1,Wh)+bh)
                     yo_t.append(relu(T.dot(h_t,Wy)+by))
@@ -252,21 +255,21 @@ elif run=='dni':
                 # Update the DNI (from the last step)
                 # re-calculate the DNI prediction from the last step
                 # note: can't be passed through scan or T.grad won't work
-                dni_out_old = self.dni.output(h_tm1)
+                dni_out_old = self.dni.output(h_tmT)
                 # dni_target: current loss backprop'ed + new dni backprop'ed
-                dni_target = T.grad(loss,h_tm1) \
-                             +T.Lop(h_t,h_tm1,dni_out)
+                dni_target = T.grad(loss,h_tmT) \
+                             +T.Lop(h_t,h_tmT,dni_out)
                 dni_error = T.sum(T.square(dni_out_old-dni_target))
                 for param in self.dni.params:
                     gparam = T.grad(dni_error,param)
                     updates[param] = param-lr*gparam
                 
                 return [h_t,loss,dni_error],updates
-            h0 = T.zeros((n_hidden,),dtype=theano.config.floatX)
+            h0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
             [h,seq_loss,dni_error_out],updates = theano.scan(fn=step, 
                                  sequences=[shufflereshape(x),
                                             shufflereshape(y)],
-                                 outputs_info=[T.alloc(h0,x.shape[0],n_hidden),
+                                 outputs_info=[T.alloc(h0,x.shape[0],self.n_hidden),
                                                None,None],
                                  non_sequences=[self.Wx,self.Wh,self.bh,
                                                 self.Wy,self.by,

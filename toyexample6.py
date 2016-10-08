@@ -104,6 +104,26 @@ def experiment(train_fcn,x_train,y_train,lr,lr_decay,batch_size,
     
     return loss, dni_err, dldp_l2, dniJ_l2, val_loss
 
+def log_results(filename,line,delay,steps,dni_scale,n_in,n_hidden,n_out,
+                loss,dni_err,dldp_l2,dniJ_l2,val_loss,overwrite=False):
+        import csv
+        import os
+        if not filename[-4:]=='.csv':
+            filename = filename+'.csv'
+        if line==0 and overwrite:
+            # check if old log exists and delete
+            if os.path.isfile(filename):
+                os.remove(filename)
+        file = open(filename,'a')
+        writer = csv.writer(file)
+        if line==0:
+            writer.writerow(('Delay','DNI_steps','DNI_scale',
+                             'n_in','n_hidden','n_out',
+                             'Training_loss','DNI_err',
+                             '|dldp|','|dniJ|','Validation_loss'))
+        writer.writerow((delay,steps,dni_scale,n_in,n_hidden,n_out,
+                         loss,dni_err,dldp_l2,dniJ_l2,val_loss))
+
 def test_dni(x_train,y_train,x_val,y_val,
              n_in,n_hidden,n_out,steps,dni_scale,
              lr,lr_decay,momentum,batch_size,n_epochs,patience):
@@ -115,6 +135,8 @@ def test_dni(x_train,y_train,x_val,y_val,
 
 
 if __name__ == "__main__":
+    import graph
+    
     # make some data
     n_in = 32
     sequence_length = 444
@@ -125,17 +147,29 @@ if __name__ == "__main__":
                                        sequence_length,delay)
     # test dni
     steps = 2 # between DNIs
-    dni_scale = 1
     lr = 1e-3
     lr_decay = 0.99
     momentum = 0.9
-    n_epochs = 1000
+    n_epochs = 500
     patience = 20
     batch_size = 100
     n_hidden = 2*n_in
     n_out = n_in
-    test_dni(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,steps,dni_scale,
-             lr,lr_decay,momentum,batch_size,n_epochs,patience)
+    
+    final_results = []
+    for dni_scale in [0,1]:
+        # run the experiment
+        loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
+            test_dni(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,steps,dni_scale,
+                     lr,lr_decay,momentum,batch_size,n_epochs,patience)
+        
+        # log the result
+        filename = 'Delay'+str(delay)+'_DNI'+str(steps)
+        log_results(filename,0,delay,steps,dni_scale,n_in,n_hidden,n_out,
+                loss,dni_err,dldp_l2,dniJ_l2,val_loss)
+        
+        # make graphs
+        graph.make_all(filename,2)
 
 
 

@@ -139,7 +139,7 @@ if __name__ == "__main__":
     
     # make some data
     n_in = 32
-    sequence_length = 444
+    sequence_length = 555
     n_train = 1000
     n_val = 100
     delay = 10

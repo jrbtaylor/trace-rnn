@@ -142,16 +142,16 @@ if __name__ == "__main__":
     sequence_length = 444
     n_train = 1000
     n_val = 100
-    delay = 3
+    delay = 10
     x_train,y_train,x_val,y_val = data(n_in,n_train,n_val,
                                        sequence_length,delay)
     # test dni
-    steps = 2 # between DNIs
+    steps = 5 # between DNIs
     lr = 1e-3
     lr_decay = 0.99
     momentum = 0.9
     n_epochs = 500
-    patience = 20
+    patience = 50
     batch_size = 100
     n_hidden = 2*n_in
     n_out = n_in

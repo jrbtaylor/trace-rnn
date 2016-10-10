@@ -147,7 +147,7 @@ if __name__ == "__main__":
                         default=[1e-3])
     delays = parser.parse_args().delay,
     dni_steps = parser.parse_args().dni_steps,
-    lr = parser.parse_args().learnrate
+    lr = parser.parse_args().learnrate[0]
     
     for steps,delay in itertools.product(dni_steps,delays):
         if type(steps)==list:

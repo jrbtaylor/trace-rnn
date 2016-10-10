@@ -138,15 +138,15 @@ if __name__ == "__main__":
     import graph
     
     # make some data
+    steps = 5 # between DNIs
+    delay = 20
+    sequence_length = steps*(500//steps)
     n_in = 32
-    sequence_length = 555
     n_train = 1000
     n_val = 100
-    delay = 10
     x_train,y_train,x_val,y_val = data(n_in,n_train,n_val,
                                        sequence_length,delay)
     # test dni
-    steps = 5 # between DNIs
     lr = 1e-3
     lr_decay = 0.99
     momentum = 0.9

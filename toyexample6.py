@@ -150,7 +150,11 @@ if __name__ == "__main__":
     lr = parser.parse_args().learnrate
     
     for steps,delay in itertools.product(dni_steps,delays):
-        # make some data
+        if type(steps)==list:
+            steps = steps[0]
+        if type(delay)==list:
+            delay = delay[0]
+	# make some data
         sequence_length = steps*(500//steps)
         n_in = 32
         n_train = 1000

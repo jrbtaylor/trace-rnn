@@ -136,40 +136,50 @@ def test_dni(x_train,y_train,x_val,y_val,
 
 if __name__ == "__main__":
     import graph
+    import itertools
+    import argparse
+    parser = argparse.ArgumentParser(description='Run DNI experiments')
+    parser.add_argument('--delay',nargs='*',type=int,
+                        default=[1,2,3,4,5])
+    parser.add_argument('--dni_steps',nargs='*',type=int,
+                        default=[3])
+    parser.add_argument('--learnrate',nargs='*',type=float,
+                        default=[1e-3])
+    delays = parser.parse_args().delay,
+    dni_steps = parser.parse_args().dni_steps,
+    lr = parser.parse_args().learnrate
     
-    # make some data
-    steps = 5 # between DNIs
-    delay = 20
-    sequence_length = steps*(500//steps)
-    n_in = 32
-    n_train = 1000
-    n_val = 100
-    x_train,y_train,x_val,y_val = data(n_in,n_train,n_val,
-                                       sequence_length,delay)
-    # test dni
-    lr = 1e-3
-    lr_decay = 0.99
-    momentum = 0.9
-    n_epochs = 500
-    patience = 50
-    batch_size = 100
-    n_hidden = 2*n_in
-    n_out = n_in
-    
-    final_results = []
-    for dni_scale in [0,1]:
-        # run the experiment
-        loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
-            test_dni(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,steps,dni_scale,
-                     lr,lr_decay,momentum,batch_size,n_epochs,patience)
+    for steps,delay in itertools.product(dni_steps,delays):
+        # make some data
+        sequence_length = steps*(500//steps)
+        n_in = 32
+        n_train = 1000
+        n_val = 100
+        x_train,y_train,x_val,y_val = data(n_in,n_train,n_val,
+                                           sequence_length,delay)
+        # test dni
+        lr_decay = 0.99
+        momentum = 0.9
+        n_epochs = 500
+        patience = 50
+        batch_size = 100
+        n_hidden = 2*n_in
+        n_out = n_in
         
-        # log the result
-        filename = 'Delay'+str(delay)+'_DNI'+str(steps)
-        log_results(filename,0,delay,steps,dni_scale,n_in,n_hidden,n_out,
-                loss,dni_err,dldp_l2,dniJ_l2,val_loss)
-        
-        # make graphs
-        graph.make_all(filename,2)
+        final_results = []
+        for dni_scale in [0,1]:
+            # run the experiment
+            loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
+                test_dni(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,steps,dni_scale,
+                         lr,lr_decay,momentum,batch_size,n_epochs,patience)
+            
+            # log the result
+            filename = 'Delay'+str(delay)+'_DNI'+str(steps)
+            log_results(filename,0,delay,steps,dni_scale,n_in,n_hidden,n_out,
+                    loss,dni_err,dldp_l2,dniJ_l2,val_loss)
+            
+            # make graphs
+            graph.make_all(filename,2)
 
 
 

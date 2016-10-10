@@ -167,7 +167,7 @@ if __name__ == "__main__":
         n_epochs = 500
         patience = 50
         batch_size = 100
-        n_hidden = 2*n_in
+        n_hidden = delay*n_in
         n_out = n_in
         
         final_results = []

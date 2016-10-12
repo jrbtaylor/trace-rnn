@@ -133,6 +133,15 @@ def test_dni(x_train,y_train,x_val,y_val,
     return experiment(train,x_train,y_train,lr,lr_decay,batch_size,
                       test,x_val,y_val,n_epochs,patience)
 
+def test_lstm_dni(x_train,y_train,x_val,y_val,
+             n_in,n_hidden,n_out,steps,dni_scale,
+             lr,lr_decay,momentum,batch_size,n_epochs,patience):
+    model = recurrent.lstm_dni(n_in,n_hidden,n_out,steps)
+    train = lambda x,y,l: model.train()(x,y,l,momentum,dni_scale)
+    test = model.test()
+    return experiment(train,x_train,y_train,lr,lr_decay,batch_size,
+                      test,x_val,y_val,n_epochs,patience)
+
 
 if __name__ == "__main__":
     import graph

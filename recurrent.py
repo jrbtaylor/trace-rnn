@@ -265,12 +265,11 @@ class rnn_dni(object):
 
 
 class lstm_dni(object):
-    def __init__(self,x,n_in,n_hidden,n_out,bptt_limit):
-        self.x = x
+    def __init__(self,n_in,n_hidden,n_out,steps,rng=rng):
         self.n_in = n_in
         self.n_hidden = n_hidden
         self.n_out = n_out
-        self.bptt_limit = bptt_limit
+        self.steps = steps
         
         # initialize weights
         self.Wxi = uniform_weight(n_in,n_hidden)

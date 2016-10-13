@@ -149,14 +149,17 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Run DNI experiments')
     parser.add_argument('--delay',nargs='*',type=int,
-                        default=[1,2,3,4,5])
+                        default=[5,10,20,30])
     parser.add_argument('--dni_steps',nargs='*',type=int,
-                        default=[3])
+                        default=[5])
     parser.add_argument('--learnrate',nargs='*',type=float,
                         default=[1e-3])
+    parser.add_argument('--model',nargs='*',type=str,
+                        default=['lstm'])
     delays = parser.parse_args().delay,
     dni_steps = parser.parse_args().dni_steps,
     lr = parser.parse_args().learnrate[0]
+    model = parser.parse_args().model[0]
     
     for steps,delay in itertools.product(dni_steps,delays):
         if type(steps)==list:
@@ -164,9 +167,9 @@ if __name__ == "__main__":
         if type(delay)==list:
             delay = delay[0]
 	# make some data
-        sequence_length = steps*(500//steps)
-        n_in = 32
-        n_train = 1000
+        sequence_length = steps*(100//steps)
+        n_in = 256
+        n_train = 500
         n_val = 100
         x_train,y_train,x_val,y_val = data(n_in,n_train,n_val,
                                            sequence_length,delay)
@@ -180,14 +183,21 @@ if __name__ == "__main__":
         n_out = n_in
         
         final_results = []
-        for dni_scale in [0,1]:
+        for dni_scale in [0,0.1,1]:
             # run the experiment
-            loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
-                test_dni(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,steps,dni_scale,
-                         lr,lr_decay,momentum,batch_size,n_epochs,patience)
+            if model == 'rnn':
+                loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
+                    test_dni(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,steps,dni_scale,
+                             lr,lr_decay,momentum,batch_size,n_epochs,patience)
+            elif model == 'lstm':
+                loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
+                    test_lstm_dni(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,steps,dni_scale,
+                             lr,lr_decay,momentum,batch_size,n_epochs,patience)
+            else:
+                print('unknown model type')
             
             # log the result
-            filename = 'Delay'+str(delay)+'_DNI'+str(steps)
+            filename = model+'_delay'+str(delay)+'_DNI'+str(steps)
             log_results(filename,0,delay,steps,dni_scale,n_in,n_hidden,n_out,
                     loss,dni_err,dldp_l2,dniJ_l2,val_loss)
             

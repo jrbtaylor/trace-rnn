@@ -220,6 +220,8 @@ class rnn_dni(object):
             # dni_target: current loss backprop'ed + new dni backprop'ed
             dni_target = T.grad(loss,h_tmT) \
                          +T.Lop(h_t,h_tmT,dni_out)
+            # consider target as a constant - train old DNI output to match it
+            dni_target = theano.gradient.disconnected_grad(dni_target)
             dni_error = T.sum(T.square(dni_out_old-dni_target))
             for [param,gparam_mom] in zip(self.dni.params,self.dni.gparams_mom):
                 gparam = T.grad(dni_error,param)
@@ -336,7 +338,7 @@ class lstm_dni(object):
                 g = tanh(T.dot(x_t[t],Wxg)+T.dot(s_tm1,Wsg)+bg)
                 c_t = c_tm1*f+g*i
                 s_t = tanh(c_t)*o
-                yo_t.append(softmax(T.dot(s_t,Wsy)+by))
+                yo_t.append(relu(T.dot(s_t,Wsy)+by))
                 # update for next step
                 c_tm1 = c_t
                 s_tm1 = s_t
@@ -345,9 +347,7 @@ class lstm_dni(object):
             up_dldp_l2 = 0
             up_dni_l2 = 0
             # Train the LSTM: backprop (loss + DNI output)
-            loss = T.mean(categorical_crossentropy(yo_t,y_t))
-            pred = T.argmax(yo_t,axis=2)
-            error = T.mean(T.neq(pred,y_t))
+            loss = T.mean(T.square(yo_t-y_t))
             dni_out = self.dni.output(s_t)
             for [param,gparam_mom] in zip(self.params,self.gparams_mom):
                 dlossdparam = T.grad(loss,param)
@@ -364,6 +364,8 @@ class lstm_dni(object):
             # dni target: current loss backprop'ed + new dni backprop'ed
             dni_target = T.grad(loss,s_tmT) \
                          +T.Lop(s_t,s_tmT,dni_out)
+            # consider target as a constant - train old DNI output to match it
+            dni_target = theano.gradient.disconnected_grad(dni_target)
             dni_error = T.sum(T.square(dni_out_old-dni_target))
             for [param,gparam_mom] in zip(self.dni.params,self.dni.gparams_mom):
                 gparam = T.grad(dni_error,param)
@@ -371,20 +373,19 @@ class lstm_dni(object):
                                       -(1.-momentum)*lr*gparam
                 updates[param] = param+updates[gparam_mom]
             
-            return [c_t,s_t,loss,error,dni_error,
+            return [c_t,s_t,loss,dni_error,
                     T.sqrt(up_dldp_l2),T.sqrt(up_dni_l2)],updates
         
         c0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
         s0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
         [c,s,
-         seq_loss,seq_error,
-         seq_dni_error,
+         seq_loss,seq_dni_error,
          up_dldp,up_dni],updates = theano.scan(fn=step,
                                 sequences=[shufflereshape(x),
                                            shufflereshape(y)],
                                 outputs_info=[T.alloc(c0,x.shape[0],self.n_hidden),
                                               T.alloc(s0,x.shape[0],self.n_hidden),
-                                              None,None,None,None,None],
+                                              None,None,None,None],
                                 non_sequences=[self.Wxi,self.Wsi,self.Wxf,self.Wsf,
                                                self.Wxo,self.Wso,self.Wxg,self.Wsg,
                                                self.Wsy,self.bi,self.bf,self.bo,
@@ -392,7 +393,6 @@ class lstm_dni(object):
                                                learning_rate,momentum,dni_scale])
         return theano.function(inputs=[x,y,learning_rate,momentum,dni_scale],
                                outputs=[T.mean(seq_loss),
-                                        T.mean(seq_error),
                                         T.mean(seq_dni_error),
                                         T.mean(up_dldp),
                                         T.mean(up_dni)],
@@ -423,11 +423,9 @@ class lstm_dni(object):
                                              self.Wsy,self.bi,self.bf,self.bo,
                                              self.bg,self.by],
                               strict=True)
-        loss = T.mean(categorical_crossentropy(yo,y))
-        pred = T.argmax(yo,axis=2)
-        error = T.mean(T.neq(pred,y))
+        mse = T.mean(T.square(y.dimshuffle([1,0,2])-yo))
         return theano.function(inputs=[x,y],
-                               outputs=[loss,pred,error])
+                               outputs=mse)
         
         
 

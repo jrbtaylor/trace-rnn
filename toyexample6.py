@@ -16,17 +16,32 @@ import timeit
 import recurrent
 
 # -----------------------------------------------------------------------------
-# Simple recall data
+# Common copy task
+# n_in is the number of words + 2 (one for pause, one for copy)
+# the n_in-2 words are randomly chosen and 1-hot encoded sequence_length times
+# then the blank character is input pause times
+# then the copy character is input (once)
+# then the output repeats the original sequence (minus the pause & copy words)
+# the input during the copy is the blank character again
 # -----------------------------------------------------------------------------
 
-def data(n_in,n_train,n_val,sequence_length,delay):
+def data(n_in,n_train,n_val,sequence_length,pause):
     rng = numpy.random.RandomState(1)
     def generate_data(examples):
-        x = rng.uniform(low=0,high=1,
-                        size=(examples,sequence_length,n_in)).astype('float32')
-        y = numpy.zeros((x.shape[0],sequence_length,n_in),dtype='float32')
-        for t in range(sequence_length):
-            y[:,t,:] = x[:,t-delay,:]
+        x = numpy.zeros((examples,2*sequence_length+pause+1,n_in),dtype='float32')
+        y = numpy.zeros((examples,2*sequence_length+pause+1,n_in-2),dtype='float32')
+        for ex in range(examples):
+            # original sequence
+            oneloc = rng.randint(0,n_in-2,size=(sequence_length))
+            x[ex,numpy.arange(sequence_length),oneloc] = 1
+            # blank characters before copy
+            x[ex,sequence_length+numpy.arange(pause),n_in-2] = 1
+            # copy character
+            x[ex,sequence_length+pause,n_in-1] = 1
+            # blank characters during copy
+            x[ex,sequence_length+pause+1+numpy.arange(sequence_length),n_in-2] = 1
+            # output
+            y[ex,sequence_length+pause+1+numpy.arange(sequence_length),oneloc] = 1
         return x,y
     x_train,y_train = generate_data(n_train)
     x_val,y_val = generate_data(n_val)
@@ -148,42 +163,48 @@ if __name__ == "__main__":
     import itertools
     import argparse
     parser = argparse.ArgumentParser(description='Run DNI experiments')
-    parser.add_argument('--delay',nargs='*',type=int,
-                        default=[5,10,20,30])
+    parser.add_argument('--sequence_length',nargs='*',type=int,
+                        default=[5,10,15])
+    parser.add_argument('--pause',nargs='*',type=int,
+                        default=[-1])
     parser.add_argument('--dni_steps',nargs='*',type=int,
-                        default=[5])
+                        default=[2])
     parser.add_argument('--learnrate',nargs='*',type=float,
                         default=[1e-3])
     parser.add_argument('--model',nargs='*',type=str,
                         default=['lstm'])
-    delays = parser.parse_args().delay,
-    dni_steps = parser.parse_args().dni_steps,
+    sequence_lengths = parser.parse_args().sequence_length
+    pause = parser.parse_args().pause[0]
+    dni_steps = parser.parse_args().dni_steps
     lr = parser.parse_args().learnrate[0]
     model = parser.parse_args().model[0]
     
-    for steps,delay in itertools.product(dni_steps,delays):
+    for steps,sequence_length in itertools.product(dni_steps,sequence_lengths):
         if type(steps)==list:
             steps = steps[0]
-        if type(delay)==list:
-            delay = delay[0]
+        if type(sequence_length)==list:
+            sequence_length = sequence_length[0]
 	# make some data
-        sequence_length = steps*(100//steps)
-        n_in = 256
-        n_train = 500
-        n_val = 100
+        n_in = 10 # one-hot encoding, n_in-2 words + pause + copy
+        n_out = n_in-2
+        n_train = 4*256
+        n_val = 256
+        # note: total sequence length is 2*sequence_length+pause+1
+        #       must be divisible by steps
+        if pause==-1: # default setting is lowest that will make it reshapeable
+            pause = (2*sequence_length+1)%steps
         x_train,y_train,x_val,y_val = data(n_in,n_train,n_val,
-                                           sequence_length,delay)
+                                           sequence_length,pause)
         # test dni
-        lr_decay = 0.99
+        lr_decay = 0.995
         momentum = 0.9
         n_epochs = 500
         patience = 50
-        batch_size = 100
-        n_hidden = delay*n_in
-        n_out = n_in
+        batch_size = 256 # from paper
+        n_hidden = 256 # from paper
         
         final_results = []
-        for dni_scale in [0,0.1,1]:
+        for dni_scale in [1,0.1,0]:
             # run the experiment
             if model == 'rnn':
                 loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
@@ -197,8 +218,8 @@ if __name__ == "__main__":
                 print('unknown model type')
             
             # log the result
-            filename = model+'_delay'+str(delay)+'_DNI'+str(steps)
-            log_results(filename,0,delay,steps,dni_scale,n_in,n_hidden,n_out,
+            filename = model+'seqlen'+str(sequence_length)+'_DNI'+str(steps)
+            log_results(filename,0,sequence_length,steps,dni_scale,n_in,n_hidden,n_out,
                     loss,dni_err,dldp_l2,dniJ_l2,val_loss)
             
             # make graphs

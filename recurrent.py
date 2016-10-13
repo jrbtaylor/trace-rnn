@@ -193,16 +193,19 @@ class rnn_dni(object):
             # passing correct h_tm1 is impossible in nested scans
             yo_t = []
             h_tm1 = h_tmT
+            loss = 0
             for t in range(self.steps):
                 h_t = relu(T.dot(x_t[t],Wx)+T.dot(h_tm1,Wh)+bh)
-                yo_t.append(relu(T.dot(h_t,Wy)+by))
+                output = softmax(T.dot(h_t,Wy)+by)
+                yo_t.append(output)
                 h_tm1 = h_t
+                loss += T.mean(categorical_crossentropy(output,y_t[t]))
             
+            loss = loss/self.steps # to take mean
             updates = OrderedDict()
             up_dldp_l2 = 0
             up_dni_l2 = 0
             # Train the RNN: backprop (loss + DNI output)
-            loss = T.mean(T.square(yo_t-y_t))
             dni_out = self.dni.output(h_t)
             for [param,gparam_mom] in zip(self.params,self.gparams_mom):
                 dlossdparam = T.grad(loss,param)
@@ -220,8 +223,6 @@ class rnn_dni(object):
             # dni_target: current loss backprop'ed + new dni backprop'ed
             dni_target = T.grad(loss,h_tmT) \
                          +T.Lop(h_t,h_tmT,dni_out)
-            # consider target as a constant - train old DNI output to match it
-            dni_target = theano.gradient.disconnected_grad(dni_target)
             dni_error = T.sum(T.square(dni_out_old-dni_target))
             for [param,gparam_mom] in zip(self.dni.params,self.dni.gparams_mom):
                 gparam = T.grad(dni_error,param)
@@ -250,20 +251,22 @@ class rnn_dni(object):
         x = T.tensor3('x')
         y = T.tensor3('y')
         
-        def step(x_t,h_tm1,Wx,Wh,bh,Wy,by):
+        def step(x_t,y_t,h_tm1,Wx,Wh,bh,Wy,by):
             h_t = relu(T.dot(x_t,Wx)+T.dot(h_tm1,Wh)+bh)
-            yo_t = relu(T.dot(h_t,Wy)+by)
-            return h_t,yo_t
+            yo_t = softmax(T.dot(h_t,Wy)+by)
+            loss_t = T.mean(categorical_crossentropy(yo_t,y_t))
+            return h_t,yo_t,loss_t
         h0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
-        [h,yo],_ = theano.scan(fn=step, 
-                             sequences=[x.dimshuffle([1,0,2])],
+        [h,yo,loss],_ = theano.scan(fn=step, 
+                             sequences=[x.dimshuffle([1,0,2]),
+                                        y.dimshuffle([1,0,2])],
                              outputs_info=[T.alloc(h0,x.shape[0],self.n_hidden),
-                                           None],
+                                           None,None],
                              non_sequences=[self.Wx,self.Wh,self.bh,
                                             self.Wy,self.by])
-        mse = T.mean(T.square(y.dimshuffle([1,0,2])-yo))
+        loss = T.mean(loss)
         return theano.function(inputs=[x,y],
-                               outputs=mse)
+                               outputs=loss)
 
 
 class lstm_dni(object):
@@ -331,6 +334,7 @@ class lstm_dni(object):
             yo_t = []
             c_tm1 = c_tmT
             s_tm1 = s_tmT
+            loss = 0
             for t in range(self.steps):
                 i = sigmoid(T.dot(x_t[t],Wxi)+T.dot(s_tm1,Wsi)+bi)
                 f = sigmoid(T.dot(x_t[t],Wxf)+T.dot(s_tm1,Wsf)+bf)
@@ -338,16 +342,18 @@ class lstm_dni(object):
                 g = tanh(T.dot(x_t[t],Wxg)+T.dot(s_tm1,Wsg)+bg)
                 c_t = c_tm1*f+g*i
                 s_t = tanh(c_t)*o
-                yo_t.append(relu(T.dot(s_t,Wsy)+by))
+                output = softmax(T.dot(s_t,Wsy)+by)
+                yo_t.append(output)
                 # update for next step
                 c_tm1 = c_t
                 s_tm1 = s_t
+                loss += T.mean(categorical_crossentropy(output,y_t[t]))
             
+            loss = loss/self.steps # to take mean
             updates = OrderedDict()
             up_dldp_l2 = 0
             up_dni_l2 = 0
             # Train the LSTM: backprop (loss + DNI output)
-            loss = T.mean(T.square(yo_t-y_t))
             dni_out = self.dni.output(s_t)
             for [param,gparam_mom] in zip(self.params,self.gparams_mom):
                 dlossdparam = T.grad(loss,param)
@@ -364,8 +370,6 @@ class lstm_dni(object):
             # dni target: current loss backprop'ed + new dni backprop'ed
             dni_target = T.grad(loss,s_tmT) \
                          +T.Lop(s_t,s_tmT,dni_out)
-            # consider target as a constant - train old DNI output to match it
-            dni_target = theano.gradient.disconnected_grad(dni_target)
             dni_error = T.sum(T.square(dni_out_old-dni_target))
             for [param,gparam_mom] in zip(self.dni.params,self.dni.gparams_mom):
                 gparam = T.grad(dni_error,param)
@@ -402,30 +406,32 @@ class lstm_dni(object):
         x = T.tensor3('x')
         y = T.tensor3('y')
         
-        def step(x_t,c_tm1,s_tm1,Wxi,Wsi,Wxf,Wsf,Wxo,Wso,Wxg,Wsg,Wsy,bi,bf,bo,bg,by):
+        def step(x_t,y_t,c_tm1,s_tm1,Wxi,Wsi,Wxf,Wsf,Wxo,Wso,Wxg,Wsg,Wsy,bi,bf,bo,bg,by):
             i = sigmoid(T.dot(x_t,Wxi)+T.dot(s_tm1,Wsi)+bi)
             f = sigmoid(T.dot(x_t,Wxf)+T.dot(s_tm1,Wsf)+bf)
             o = sigmoid(T.dot(x_t,Wxo)+T.dot(s_tm1,Wso)+bo)
             g = tanh(T.dot(x_t,Wxg)+T.dot(s_tm1,Wsg)+bg)
             c = c_tm1*f+g*i
             s = tanh(c)*o
-            yo = softmax(T.dot(s,Wsy)+by)
-            return [c,s,yo]
+            yo_t = softmax(T.dot(s,Wsy)+by)
+            loss_t = T.mean(categorical_crossentropy(yo_t,y_t))
+            return c,s,yo_t,loss_t
         c0 = T.alloc(T.zeros((self.n_hidden,),dtype=theano.config.floatX),
                      x.shape[0],self.n_hidden)
         s0 = T.alloc(T.zeros((self.n_hidden,),dtype=theano.config.floatX),
                      x.shape[0],self.n_hidden)
-        [c,s,yo],_ = theano.scan(fn=step,
-                              sequences=x.dimshuffle([1,0,2]),
-                              outputs_info=[c0,s0,None],
+        [c,s,yo,loss],_ = theano.scan(fn=step,
+                              sequences=[x.dimshuffle([1,0,2]),
+                                         y.dimshuffle([1,0,2])],
+                              outputs_info=[c0,s0,None,None],
                               non_sequences=[self.Wxi,self.Wsi,self.Wxf,self.Wsf,
                                              self.Wxo,self.Wso,self.Wxg,self.Wsg,
                                              self.Wsy,self.bi,self.bf,self.bo,
                                              self.bg,self.by],
                               strict=True)
-        mse = T.mean(T.square(y.dimshuffle([1,0,2])-yo))
+        loss = T.mean(loss)
         return theano.function(inputs=[x,y],
-                               outputs=mse)
+                               outputs=loss)
         
         
 

@@ -107,7 +107,7 @@ def experiment(train_fcn,x_train,y_train,lr,lr_decay,batch_size,
         val_loss.append(val_loss_epoch)
         
         # early stopping
-        if val_loss_epoch<0.995*best_val:
+        if val_loss_epoch<best_val:
             best_val = val_loss_epoch
             patience = init_patience
         else:
@@ -119,7 +119,7 @@ def experiment(train_fcn,x_train,y_train,lr,lr_decay,batch_size,
     
     return loss, dni_err, dldp_l2, dniJ_l2, val_loss
 
-def log_results(filename,line,delay,steps,dni_scale,n_in,n_hidden,n_out,
+def log_results(filename,line,sequence_length,steps,dni_scale,n_in,n_hidden,n_out,
                 loss,dni_err,dldp_l2,dniJ_l2,val_loss,overwrite=False):
         import csv
         import os
@@ -132,11 +132,11 @@ def log_results(filename,line,delay,steps,dni_scale,n_in,n_hidden,n_out,
         file = open(filename,'a')
         writer = csv.writer(file)
         if line==0:
-            writer.writerow(('Delay','DNI_steps','DNI_scale',
+            writer.writerow(('sequence_length','DNI_steps','DNI_scale',
                              'n_in','n_hidden','n_out',
                              'Training_loss','DNI_err',
                              '|dldp|','|dniJ|','Validation_loss'))
-        writer.writerow((delay,steps,dni_scale,n_in,n_hidden,n_out,
+        writer.writerow((sequence_length,steps,dni_scale,n_in,n_hidden,n_out,
                          loss,dni_err,dldp_l2,dniJ_l2,val_loss))
 
 def test_dni(x_train,y_train,x_val,y_val,
@@ -184,10 +184,11 @@ if __name__ == "__main__":
             steps = steps[0]
         if type(sequence_length)==list:
             sequence_length = sequence_length[0]
-	# make some data
-        n_in = 10 # one-hot encoding, n_in-2 words + pause + copy
+        
+	   # make some data
+        n_in = 6 # one-hot encoding, n_in-2 words + pause + copy
         n_out = n_in-2
-        n_train = 4*256
+        n_train = 20*256
         n_val = 256
         # note: total sequence length is 2*sequence_length+pause+1
         #       must be divisible by steps
@@ -195,6 +196,7 @@ if __name__ == "__main__":
             pause = (2*sequence_length+1)%steps
         x_train,y_train,x_val,y_val = data(n_in,n_train,n_val,
                                            sequence_length,pause)
+        
         # test dni
         lr_decay = 0.995
         momentum = 0.9

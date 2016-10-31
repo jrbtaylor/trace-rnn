@@ -3,7 +3,6 @@
 Created on Thu Oct  6 16:34:41 2016
 
 Test the generally implemented RNN-DNI class in recurrent.py
-    - implement momentum
     - track loss, dni_error, update magnitudes from both loss & dni components
     - compare with preliminary eligibility trace idea
 
@@ -113,6 +112,11 @@ def experiment(train_fcn,x_train,y_train,lr,lr_decay,batch_size,
         else:
             patience -= 1
         
+        # or stop once it gets good enough
+        # DNI paper stops <0.15 bits error
+        if val_loss_epoch<0.15*numpy.log(2):
+            patience = 0
+        
         # set up next epoch
         epoch += 1
         lr = lr*lr_decay
@@ -141,18 +145,38 @@ def log_results(filename,line,sequence_length,steps,dni_scale,n_in,n_hidden,n_ou
 
 def test_dni(x_train,y_train,x_val,y_val,
              n_in,n_hidden,n_out,steps,dni_scale,
-             lr,lr_decay,momentum,batch_size,n_epochs,patience):
+             lr,lr_decay,batch_size,n_epochs,patience):
     model = recurrent.rnn_dni(n_in,n_hidden,n_out,steps)
-    train = lambda x,y,l: model.train()(x,y,l,momentum,dni_scale)
+    train = lambda x,y,l: model.train()(x,y,l,dni_scale)
+    test = model.test()
+    return experiment(train,x_train,y_train,lr,lr_decay,batch_size,
+                      test,x_val,y_val,n_epochs,patience)
+
+def test_dni_trace(x_train,y_train,x_val,y_val,
+             n_in,n_hidden,n_out,steps,dni_scale,
+             lr,lr_decay,batch_size,n_epochs,patience):
+    model = recurrent.rnn_trace(n_in,n_hidden,n_out,steps)
+    trace_decay = 0.9
+    train = lambda x,y,l: model.train()(x,y,l,dni_scale,trace_decay)
     test = model.test()
     return experiment(train,x_train,y_train,lr,lr_decay,batch_size,
                       test,x_val,y_val,n_epochs,patience)
 
 def test_lstm_dni(x_train,y_train,x_val,y_val,
              n_in,n_hidden,n_out,steps,dni_scale,
-             lr,lr_decay,momentum,batch_size,n_epochs,patience):
+             lr,lr_decay,batch_size,n_epochs,patience):
     model = recurrent.lstm_dni(n_in,n_hidden,n_out,steps)
-    train = lambda x,y,l: model.train()(x,y,l,momentum,dni_scale)
+    train = lambda x,y,l: model.train()(x,y,l,dni_scale)
+    test = model.test()
+    return experiment(train,x_train,y_train,lr,lr_decay,batch_size,
+                      test,x_val,y_val,n_epochs,patience)
+
+def test_lstm_trace(x_train,y_train,x_val,y_val,
+             n_in,n_hidden,n_out,steps,dni_scale,
+             lr,lr_decay,batch_size,n_epochs,patience):
+    model = recurrent.lstm_trace(n_in,n_hidden,n_out,steps)
+    trace_decay = 0.9
+    train = lambda x,y,l: model.train()(x,y,l,dni_scale,trace_decay)
     test = model.test()
     return experiment(train,x_train,y_train,lr,lr_decay,batch_size,
                       test,x_val,y_val,n_epochs,patience)
@@ -164,13 +188,13 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Run DNI experiments')
     parser.add_argument('--sequence_length',nargs='*',type=int,
-                        default=[5,10,15])
+                        default=[3,5,10,15])
     parser.add_argument('--pause',nargs='*',type=int,
                         default=[-1])
     parser.add_argument('--dni_steps',nargs='*',type=int,
                         default=[2])
     parser.add_argument('--learnrate',nargs='*',type=float,
-                        default=[1e-3])
+                        default=[7e-5])
     parser.add_argument('--model',nargs='*',type=str,
                         default=['lstm'])
     sequence_lengths = parser.parse_args().sequence_length
@@ -198,9 +222,8 @@ if __name__ == "__main__":
                                            sequence_length,pause)
         
         # test dni
-        lr_decay = 0.995
-        momentum = 0.9
-        n_epochs = 500
+        lr_decay = 1
+        n_epochs = 1000
         patience = 50
         batch_size = 256 # from paper
         n_hidden = 256 # from paper
@@ -211,11 +234,19 @@ if __name__ == "__main__":
             if model == 'rnn':
                 loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
                     test_dni(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,steps,dni_scale,
-                             lr,lr_decay,momentum,batch_size,n_epochs,patience)
+                             lr,lr_decay,batch_size,n_epochs,patience)
+            elif model == 'rnn_trace':
+                loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
+                    test_dni_trace(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,steps,dni_scale,
+                             lr,lr_decay,batch_size,n_epochs,patience)
             elif model == 'lstm':
                 loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
                     test_lstm_dni(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,steps,dni_scale,
-                             lr,lr_decay,momentum,batch_size,n_epochs,patience)
+                             lr,lr_decay,batch_size,n_epochs,patience)
+            elif model == 'lstm_trace':
+                loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
+                    test_lstm_trace(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,steps,dni_scale,
+                             lr,lr_decay,batch_size,n_epochs,patience)
             else:
                 print('unknown model type')
             

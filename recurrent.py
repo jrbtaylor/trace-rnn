@@ -426,10 +426,6 @@ class rnn_trace(object):
         self.by = const_bias(n_out,0)
         self.params = [self.Wx,self.Wh,self.bh,self.Wy,self.by]
         
-        # initialize activation trace
-        def floatX(data):
-            return numpy.asarray(data,dtype=theano.config.floatX)
-        self.trace = theano.shared(self.Wh.get_value()*floatX(0.))
         self.non_trace_params = [self.Wx,self.Wy,self.bh,self.by]
         
         # initialize DNI
@@ -439,11 +435,16 @@ class rnn_trace(object):
         x = T.tensor3('x')
         y = T.tensor3('y')
         learning_rate = T.scalar('learning_rate')
+        trace_decay = T.scalar('trace_decay')
         dni_scale = T.scalar('dni_scale')
         
-        # reset the activation traces for each new sequence
-        self.trace *= 0
-        eps = 1e-8 # to avoid dividing by zero
+        # re-initialize activation trace
+        def floatX(data):
+            return numpy.asarray(data,dtype=theano.config.floatX)
+        self.trace = theano.shared(self.Wh.get_value()*floatX(0.))
+        
+        # small constant to avoid dividing by zero
+        eps = 1e-8
         
         # reshape the inputs
         # batch x time x n -> time//steps x steps x batch x n
@@ -456,19 +457,24 @@ class rnn_trace(object):
             return r
         
         # step takes a set of inputs over self.steps time-steps
-        def step(x_t,y_t,h_tmT,Wx,Wh,bh,Wy,by,lr,scale):
+        def step(x_t,y_t,h_tmT,Wx,Wh,bh,Wy,by,lr,scale,trace,decay):
             
             # manually build the graph for the inner loop...
             # passing correct h_tm1 is impossible in nested scans
             yo_t = []
             h_tm1 = h_tmT
+            old_trace = trace
             loss = 0
             for t in range(self.steps):
-                h_t = relu(T.dot(x_t[t],Wx)+T.dot(h_tm1,Wh)+bh)
+                preact_h = T.dot(h_tm1,Wh)
+                h_t = relu(T.dot(x_t[t],Wx)+preact_h+bh)
                 output = softmax(T.dot(h_t,Wy)+by)
                 yo_t.append(output)
                 h_tm1 = h_t
                 loss += T.mean(categorical_crossentropy(output,y_t[t]))
+                # update traces: RMS taken over the batch dimension
+                trace = decay*trace \
+                        +T.sqrt(T.mean(T.sqr(preact_h),axis=0,keepdims=True))
             
             loss = loss/self.steps # to take mean
             up_dldp_l2 = 0
@@ -477,9 +483,9 @@ class rnn_trace(object):
             dni_out = self.dni.output(h_t)
             grads = []
             # recurrent weights incorporate traces
-            for param in [self.Ws]:
-                trace_scale = (self.trace+eps)/ \
-                                (T.sqrt(T.mean(T.sqr(self.trace)))+eps)
+            for param in [self.Wh]:
+                trace_scale = (trace+eps)/ \
+                                (T.sqrt(T.mean(T.sqr(trace)))+eps)
                 dlossdparam = T.grad(loss,param)
                 dniJ = T.Lop(h_t,param,dni_out,disconnected_inputs='ignore')
                 up_dldp_l2 += T.sum(T.square(dlossdparam))
@@ -503,7 +509,9 @@ class rnn_trace(object):
             for param in self.dni.params:
                 grads.append(T.grad(dni_error,param))
             
-            updates = adam(lr,self.params+self.dni.params,grads)
+            # params need to be passed to adam in same order as their grads
+            updates = adam(lr,[self.Wh]+self.non_trace_params+self.dni.params,grads)
+            updates.append((old_trace,trace))
             
             return [h_t,loss,dni_error,T.sqrt(up_dldp_l2),T.sqrt(up_dni_l2)],updates
             
@@ -515,8 +523,10 @@ class rnn_trace(object):
                                            None,None,None,None],
                              non_sequences=[self.Wx,self.Wh,self.bh,
                                             self.Wy,self.by,
-                                            learning_rate,dni_scale])
-        return theano.function(inputs=[x,y,learning_rate,dni_scale],
+                                            learning_rate,dni_scale,
+                                            self.trace,trace_decay])
+        return theano.function(inputs=[x,y,learning_rate,
+                                       dni_scale,trace_decay],
                                outputs=[T.mean(seq_loss),
                                         T.mean(seq_dni_error),
                                         T.mean(up_dldp),
@@ -577,10 +587,7 @@ class lstm_trace(object):
         self.W = [self.Wx,self.Ws,self.Wy]
         self.b = [self.bx,self.by]
         
-        # initialize activation trace
-        def floatX(data):
-            return numpy.asarray(data,dtype=theano.config.floatX)
-        self.trace = theano.shared(self.Ws.get_value()*floatX(0.))
+        self.trace_params = [self.Ws]
         self.non_trace_params = [self.Wx,self.Wy,self.bx,self.by]
         
         self.L1 = numpy.sum([abs(w).sum() for w in self.W])
@@ -600,9 +607,13 @@ class lstm_trace(object):
         trace_decay = T.scalar('trace_decay')
         dni_scale = T.scalar('dni_scale')
         
-        # reset the activation traces for each new sequence
-        self.trace *= 0
-        eps = 1e-8 # to avoid dividing by zero
+        # re-initialize activation trace
+        def floatX(data):
+            return numpy.asarray(data,dtype=theano.config.floatX)
+        self.trace = theano.shared(self.Ws.get_value()*floatX(0.))
+        
+        # small constant to avoid dividing by zero
+        eps = 1e-8
         
         # reshape the inputs
         # batch x time x n -> time//steps x steps x batch x n
@@ -617,12 +628,13 @@ class lstm_trace(object):
         # step takes a set of inputs over self.steps time-steps
         def step(x_t,y_t,c_tmT,s_tmT,
                  Wx,Ws,Wy,bx,by,
-                 lr,scale):
+                 lr,scale,trace,decay):
             
             # manually build the graph for the inner loop
             yo_t = []
             c_tm1 = c_tmT
             s_tm1 = s_tmT
+            old_trace = trace
             loss = 0
             for t in range(self.steps):
                 preact_x = T.dot(x_t[t],Wx)
@@ -642,8 +654,9 @@ class lstm_trace(object):
                 s_tm1 = s_t
                 loss += T.mean(categorical_crossentropy(output,y_t[t]))
                 
-                # update traces
-                self.trace = trace_decay*self.trace+T.abs(preact_s)
+                # update traces: RMS taken over the batch dimension
+                trace = decay*trace \
+                         +T.sqrt(T.mean(T.sqr(preact_s),axis=0,keepdims=True))
             
             loss = loss/self.steps # to take mean
             up_dldp_l2 = 0
@@ -652,9 +665,9 @@ class lstm_trace(object):
             dni_out = self.dni.output(s_t)
             grads = []
             # recurrent weights incorporate traces
-            for param in [self.Ws]:
-                trace_scale = (self.trace+eps)/ \
-                                (T.sqrt(T.mean(T.sqr(self.trace)))+eps)
+            for param in self.trace_params:
+                trace_scale = (trace+eps)/ \
+                                (T.sqrt(T.mean(T.sqr(trace)))+eps)
                 dlossdparam = T.grad(loss,param)
                 dniJ = T.Lop(s_t,param,dni_out,disconnected_inputs='ignore')
                 up_dldp_l2 += T.sum(T.square(dlossdparam))
@@ -678,7 +691,9 @@ class lstm_trace(object):
             for param in self.dni.params:
                 grads.append(T.grad(dni_error,param))
             
-            updates = adam(lr,self.params+self.dni.params,grads)
+            # params need to be passed to adam in same order as their grads
+            updates = adam(lr,self.trace_params+self.non_trace_params+self.dni.params,grads)
+            updates.append((old_trace,trace))
             
             return [c_t,s_t,loss,dni_error,
                     T.sqrt(up_dldp_l2),T.sqrt(up_dni_l2)],updates
@@ -695,7 +710,8 @@ class lstm_trace(object):
                                               None,None,None,None],
                                 non_sequences=[self.Wx,self.Ws,self.Wy,
                                                self.bx,self.by,
-                                               learning_rate,dni_scale])
+                                               learning_rate,dni_scale,
+                                               self.trace,trace_decay])
         return theano.function(inputs=[x,y,learning_rate,dni_scale,trace_decay],
                                outputs=[T.mean(seq_loss),
                                         T.mean(seq_dni_error),
@@ -708,8 +724,8 @@ class lstm_trace(object):
         y = T.tensor3('y')
         
         def step(x_t,y_t,c_tm1,s_tm1,
-                 Wx,Ws,Wy,b,by):
-            preact = T.dot(x_t,Wx)+T.dot(s_tm1,Ws)+b
+                 Wx,Ws,Wy,bx,by):
+            preact = T.dot(x_t,Wx)+T.dot(s_tm1,Ws)+bx
             i = sigmoid(self._slice(preact,0))
             f = sigmoid(self._slice(preact,1))
             o = sigmoid(self._slice(preact,2))
@@ -728,7 +744,7 @@ class lstm_trace(object):
                                          y.dimshuffle([1,0,2])],
                               outputs_info=[c0,s0,None,None],
                               non_sequences=[self.Wx,self.Ws,self.Wy,
-                                             self.b,self.by])
+                                             self.bx,self.by])
         loss = T.mean(loss)
         return theano.function(inputs=[x,y],
                                outputs=loss)

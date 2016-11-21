@@ -15,6 +15,8 @@ from theano.tensor import tanh
 from theano.tensor.nnet import sigmoid, relu
 from theano.tensor.nnet.nnet import softmax, categorical_crossentropy
 
+from optim import adam
+
 rng = numpy.random.RandomState(1)
 
 # from http://deeplearning.net/tutorial/code/lstm.py
@@ -407,6 +409,169 @@ class lstm_dni(object):
         return theano.function(inputs=[x,y],
                                outputs=loss)
 
+
+# Try separate DNI outputs for the cell and hidden states (paper isn't clear)
+class lstm_dni2(object):
+    def __init__(self,n_in,n_hidden,n_out,steps,rng=rng):
+        self.n_in = n_in
+        self.n_hidden = n_hidden
+        self.n_out = n_out
+        self.steps = steps
+        
+        # initialize weights
+        def ortho_weight(ndim,rng=rng):
+            W = rng.randn(ndim, ndim)
+            u, s, v = numpy.linalg.svd(W)
+            return u.astype(theano.config.floatX)
+        def uniform_weight(n1,n2,rng=rng):
+            limit = numpy.sqrt(6./(n1+n2))
+            return rng.uniform(low=-limit,high=limit,size=(n1,n2)).astype(theano.config.floatX)
+        def const_bias(n,value=0):
+            return value*numpy.ones((n,),dtype=theano.config.floatX)
+        self.Wx = theano.shared(numpy.concatenate(
+                    [uniform_weight(n_in,n_hidden) for i in range(4)],axis=1),
+                     borrow=True)
+        self.Ws = theano.shared(numpy.concatenate(
+                    [ortho_weight(n_hidden,rng) for i in range(4)],axis=1),
+                     borrow=True)
+        self.Wy = theano.shared(uniform_weight(n_hidden,n_out))
+        self.b = theano.shared(numpy.concatenate(
+                    [const_bias(n_hidden,0) for i in range(4)],axis=0),
+                     borrow=True)
+        self.by = theano.shared(const_bias(n_out,0))
+        
+        self.params = [self.Wx,self.Ws,self.Wy,self.b,self.by]
+        self.W = [self.Wx,self.Ws,self.Wy]
+        self.L1 = numpy.sum([abs(w).sum() for w in self.W])
+        self.L2 = numpy.sum([(w**2).sum() for w in self.W])
+        
+        # initialize DNI
+        self.dni = dni(n_hidden,2*n_hidden,2)
+    
+    # slice for doing step calculations in parallel
+    def _slice(self,x,n):
+        return x[:,n*self.n_hidden:(n+1)*self.n_hidden]
+        
+    def train(self):
+        x = T.tensor3('x')
+        y = T.tensor3('y')
+        learning_rate = T.scalar('learning_rate')
+        dni_scale = T.scalar('dni_scale')
+        
+        # reshape the inputs
+        # batch x time x n -> time//steps x steps x batch x n
+        def shufflereshape(r):
+            r = r.dimshuffle([1,0,2])
+            r = r.reshape((r.shape[0]//self.steps,
+                           self.steps,
+                           r.shape[1],
+                           r.shape[2]))
+            return r
+        
+        # step takes a set of inputs over self.steps time-steps
+        def step(x_t,y_t,c_tmT,s_tmT,
+                 Wx,Ws,Wy,b,by,
+                 lr,scale):
+            
+            # manually build the graph for the inner loop
+            yo_t = []
+            c_tm1 = c_tmT
+            s_tm1 = s_tmT
+            loss = 0
+            for t in range(self.steps):
+                preact = T.dot(x_t[t],Wx)+T.dot(s_tm1,Ws)+b
+                i = sigmoid(self._slice(preact,0))
+                f = sigmoid(self._slice(preact,1))
+                o = sigmoid(self._slice(preact,2))
+                g = tanh(self._slice(preact,3))
+                c_t = c_tm1*f+g*i
+                s_t = tanh(c_t)*o
+                output = softmax(T.dot(s_t,Wy)+by)
+                yo_t.append(output)
+                # update for next step
+                c_tm1 = c_t
+                s_tm1 = s_t
+                loss += T.mean(categorical_crossentropy(output,y_t[t]))
+            
+            loss = loss/self.steps # to take mean
+            up_dldp_l2 = 0
+            up_dni_l2 = 0
+            # Train the LSTM: backprop (loss + DNI output)
+            dni_out = self.dni.output(s_t)
+            grads = []
+            for param in self.params:
+                dlossdparam = T.grad(loss,param)
+                dniJ = T.Lop(s_t,param,dni_out,disconnected_inputs='ignore')
+                up_dldp_l2 += T.sum(T.square(dlossdparam))
+                up_dni_l2 += T.sum(T.square(dniJ))
+                grads.append(dlossdparam+scale*dniJ)
+            
+            # Update the DNI (from the last step)
+            # recalculate the DNI prediction since it can't be passed
+            dni_out_old =self.dni.output(s_tmT)
+            # dni target: current loss backprop'ed + new dni backprop'ed
+            dni_target = T.grad(loss,s_tmT) \
+                         +T.Lop(s_t,s_tmT,dni_out)
+            dni_error = T.sum(T.square(dni_out_old-dni_target))
+            for param in self.dni.params:
+                grads.append(T.grad(dni_error,param))
+            
+            updates = adam(lr,self.params+self.dni.params,grads)
+            
+            return [c_t,s_t,loss,dni_error,
+                    T.sqrt(up_dldp_l2),T.sqrt(up_dni_l2)],updates
+        
+        c0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
+        s0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
+        [c,s,
+         seq_loss,seq_dni_error,
+         up_dldp,up_dni],updates = theano.scan(fn=step,
+                                sequences=[shufflereshape(x),
+                                           shufflereshape(y)],
+                                outputs_info=[T.alloc(c0,x.shape[0],self.n_hidden),
+                                              T.alloc(s0,x.shape[0],self.n_hidden),
+                                              None,None,None,None],
+                                non_sequences=[self.Wx,self.Ws,self.Wy,
+                                               self.b,self.by,
+                                               learning_rate,dni_scale])
+        return theano.function(inputs=[x,y,learning_rate,dni_scale],
+                               outputs=[T.mean(seq_loss),
+                                        T.mean(seq_dni_error),
+                                        T.mean(up_dldp),
+                                        T.mean(up_dni)],
+                                updates=updates)
+    
+    def test(self):
+        x = T.tensor3('x')
+        y = T.tensor3('y')
+        
+        def step(x_t,y_t,c_tm1,s_tm1,
+                 Wx,Ws,Wy,b,by):
+            preact = T.dot(x_t,Wx)+T.dot(s_tm1,Ws)+b
+            i = sigmoid(self._slice(preact,0))
+            f = sigmoid(self._slice(preact,1))
+            o = sigmoid(self._slice(preact,2))
+            g = tanh(self._slice(preact,3))
+            c_t = c_tm1*f+g*i
+            s_t = tanh(c_t)*o
+            yo_t = softmax(T.dot(s_t,Wy)+by)
+            loss_t = T.mean(categorical_crossentropy(yo_t,y_t))
+            return c_t,s_t,yo_t,loss_t
+        c0 = T.alloc(T.zeros((self.n_hidden,),dtype=theano.config.floatX),
+                     x.shape[0],self.n_hidden)
+        s0 = T.alloc(T.zeros((self.n_hidden,),dtype=theano.config.floatX),
+                     x.shape[0],self.n_hidden)
+        [c,s,yo,loss],_ = theano.scan(fn=step,
+                              sequences=[x.dimshuffle([1,0,2]),
+                                         y.dimshuffle([1,0,2])],
+                              outputs_info=[c0,s0,None,None],
+                              non_sequences=[self.Wx,self.Ws,self.Wy,
+                                             self.b,self.by])
+        loss = T.mean(loss)
+        return theano.function(inputs=[x,y],
+                               outputs=loss)
+
+
 class rnn_trace(object):
     def __init__(self,n_in,n_hidden,n_out,steps,rng=rng):
         """
@@ -749,47 +914,7 @@ class lstm_trace(object):
         return theano.function(inputs=[x,y],
                                outputs=loss)
 
-        
-def adam(lr,params,grads):
-    """
-    Adam optimization
-    
-    Parameters
-    ----------
-    lr: Theano SharedVariable
-        Initial learning rate
-    params: list of Theano SharedVariable
-        Model parameters
-    grads: list of Theano variables
-        Gradients of cost w.r.t. parameters
-    
-    """
-    # default values
-    epsilon = 1e-8
-    b1 = 0.9
-    b2 = 0.999
-    
-    def floatX(data):
-        return numpy.asarray(data,dtype=theano.config.floatX)
-    
-    updates = []
-    t = theano.shared(floatX(1.))
-    t_new = t+1
-    updates.append((t,t_new))
-    for p,g in zip(params,grads):
-        m = theano.shared(p.get_value()*floatX(0.))
-        m_new = b1*m+(1-b1)*g
-        updates.append((m,m_new))
-        
-        v = theano.shared(p.get_value()*floatX(0.))
-        v_new = b2*v+(1-b2)*g**2
-        updates.append((v,v_new))
-        
-        mhat = m_new/(1-b1**t)
-        vhat = v_new/(1-b2**t)
-        updates.append((p,p-lr*mhat/(T.sqrt(vhat)+epsilon)))
-        
-    return updates
+
         
 
 

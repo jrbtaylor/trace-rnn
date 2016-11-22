@@ -157,8 +157,8 @@ class lstm_slice(object):
                                       outputs_info=[dict(initial=c0,taps=[-1]),
                                                     dict(initial=s0,taps=[-1]),
                                                     None],
-                                      non_sequences=[self.Wxi,self.Wsi,self.Wxf,self.Wsf,self.Wxo,self.Wso,self.Wxg, \
-                                                     self.Wsg,self.Wsy,self.bi,self.bf,self.bo,self.bg,self.by],
+                                      non_sequences=[self.Wx,self.Ws,self.Wy,
+                                                     self.b,self.by],
                                       strict=True)
         self.output = y
         self.pred = T.argmax(self.output,axis=1)

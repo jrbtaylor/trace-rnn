@@ -61,7 +61,7 @@ def make_graph(csvfile,metric,title,saveto,rows_to_plot=[],hyperparam_idx=0):
                 hyperparam.append(row[hyperparam_idx])
 
     # plot it
-    if len(data)>1: # don't want to save blank graphs
+    if numpy.size(data)>1: # don't want to save blank graphs
         print('making graph for '+metric)
         # loop through each row and plot
         for idx,d in enumerate(data):
@@ -71,13 +71,14 @@ def make_graph(csvfile,metric,title,saveto,rows_to_plot=[],hyperparam_idx=0):
         plt.title(title)
         
         # basic outlier detection for setting graph limits
-        ymaxs = [numpy.nanmax(d) for d in data]
-        ylim = numpy.nanmax(ymaxs)
-        everythingelse = [ymaxs[i] for i in range(len(ymaxs)) \
-                            if i!=numpy.nanargmax(ymaxs)]
-        if ylim > 10*numpy.nanmax(everythingelse):
-            ylim = numpy.nanmax(everythingelse)
-        plt.ylim(0,ylim)
+        if len(data)>1:
+            ymaxs = [numpy.nanmax(d) for d in data]
+            ylim = numpy.nanmax(ymaxs)
+            everythingelse = [ymaxs[i] for i in range(len(ymaxs)) \
+                                if i!=numpy.nanargmax(ymaxs)]
+            if ylim > 10*numpy.nanmax(everythingelse):
+                ylim = numpy.nanmax(everythingelse)
+            plt.ylim(0,ylim)
         plt.legend(title=categories[hyperparam_idx])
         
         # save it

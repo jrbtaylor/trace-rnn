@@ -204,6 +204,10 @@ def data(n_in,n_train,n_val,sequence_length,pause):
         return x,y
     x_train,y_train = generate_data(n_train)
     x_val,y_val = generate_data(n_val)
+    print(x_train.shape)
+    print(y_train.shape)
+    print(x_val.shape)
+    print(y_val.shape)
     return [x_train,y_train,x_val,y_val]
 
 
@@ -321,7 +325,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Run LSTM experiments')
     parser.add_argument('--sequence_length',nargs='*',type=int,
-                        default=[3])
+                        default=[5])
     parser.add_argument('--learnrate',nargs='*',type=float,
                         default=[5e-4])
     parser.add_argument('--model',nargs='*',type=str,
@@ -336,7 +340,6 @@ if __name__ == "__main__":
     n_train = 20*batch_size
     n_val = batch_size
     pause = 1
-    sequence_length = 5
     x_train,y_train,x_val,y_val = data(n_in,n_train,n_val,sequence_length,pause)
     
     lr_decay = 0.95

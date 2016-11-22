@@ -85,7 +85,7 @@ class lstm(object):
                                       non_sequences=[self.Wxi,self.Wsi,self.Wxf,self.Wsf,self.Wxo,self.Wso,self.Wxg, \
                                                      self.Wsg,self.Wsy,self.bi,self.bf,self.bo,self.bg,self.by],
                                       strict=True)
-        self.output = y[-1] # train on last output only? (play with this later)
+        self.output = y
         self.pred = T.argmax(self.output,axis=1)
     
     # ----- Classification -----
@@ -160,7 +160,7 @@ class lstm_slice(object):
                                       non_sequences=[self.Wxi,self.Wsi,self.Wxf,self.Wsf,self.Wxo,self.Wso,self.Wxg, \
                                                      self.Wsg,self.Wsy,self.bi,self.bf,self.bo,self.bg,self.by],
                                       strict=True)
-        self.output = y[-1] # train on last output only? (play with this later)
+        self.output = y
         self.pred = T.argmax(self.output,axis=1)
     
     # ----- Classification -----
@@ -330,7 +330,7 @@ if __name__ == "__main__":
     lr = parser.parse_args().learnrate[0]
     model = parser.parse_args().model
     
-    n_in = 4
+    n_in = 4 # n_in-2 words + pause + copy
     n_out = n_in-2
     batch_size = 512
     n_train = 20*batch_size

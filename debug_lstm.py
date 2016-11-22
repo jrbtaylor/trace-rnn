@@ -136,7 +136,7 @@ class lstm_slice(object):
         self.L2 = numpy.sum([(w**2).sum() for w in self.W])
         
         # slice for doing step calculations in parallel
-        def _slice(self,x,n):
+        def _slice(x,n):
             return x[:,n*self.n_hidden:(n+1)*self.n_hidden]        
         
         # forward function

@@ -142,10 +142,10 @@ class lstm_slice(object):
         # forward function
         def forward(x_t,c_tm1,s_tm1,Wx,Ws,Wy,b,by):
             preact = T.dot(x_t,Wx)+T.dot(s_tm1,Ws)+b
-            i = sigmoid(self._slice(preact,0))
-            f = sigmoid(self._slice(preact,1))
-            o = sigmoid(self._slice(preact,2))
-            g = tanh(self._slice(preact,3))
+            i = sigmoid(_slice(preact,0))
+            f = sigmoid(_slice(preact,1))
+            o = sigmoid(_slice(preact,2))
+            g = tanh(_slice(preact,3))
             c = c_tm1*f+g*i
             s = tanh(c)*o
             y = softmax(T.dot(s,Wy)+by)

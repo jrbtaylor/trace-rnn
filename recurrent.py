@@ -37,40 +37,53 @@ def uniform_weight(n1,n2,rng=rng):
                          ).astype(theano.config.floatX),borrow=True)
 
 class lstm(object):
-    def __init__(self,x,n_in,n_hidden,n_out,bptt_limit):
+    def __init__(self,x,n_in,n_hidden,n_out):
         self.x = x
         self.n_in = n_in
         self.n_hidden = n_hidden
         self.n_out = n_out
-        self.bptt_limit = bptt_limit
+        
         # initialize weights
-        self.Wxi = uniform_weight(n_in,n_hidden)
-        self.Wsi = ortho_weight(n_hidden,rng)
-        self.Wxf = uniform_weight(n_in,n_hidden)
-        self.Wsf = ortho_weight(n_hidden,rng)
-        self.Wxo = uniform_weight(n_in,n_hidden)
-        self.Wso = ortho_weight(n_hidden,rng)
-        self.Wxg = uniform_weight(n_in,n_hidden)
-        self.Wsg = ortho_weight(n_hidden,rng)
-        self.Wsy = uniform_weight(n_hidden,n_out)
-        self.bi = const_bias(n_hidden,0)
-        self.bf = const_bias(n_hidden,0)
-        self.bo = const_bias(n_hidden,0)
-        self.bg = const_bias(n_hidden,0)
-        self.by = const_bias(n_out,0)
-        self.params = [self.Wxi,self.Wsi,self.Wxf,self.Wsf,self.Wxo,self.Wso,self.Wxg,self.Wsg,self.Wsy,self.bi,self.bf,self.bo,self.bg,self.by]
-        self.W = [self.Wxi,self.Wsi,self.Wxf,self.Wsf,self.Wxo,self.Wso,self.Wxg,self.Wsg,self.Wsy]
+        def ortho_weight(ndim,rng=rng):
+            W = rng.randn(ndim, ndim)
+            u, s, v = numpy.linalg.svd(W)
+            return u.astype(theano.config.floatX)
+        def uniform_weight(n1,n2,rng=rng):
+            limit = numpy.sqrt(6./(n1+n2))
+            return rng.uniform(low=-limit,high=limit,size=(n1,n2)).astype(theano.config.floatX)
+        def const_bias(n,value=0):
+            return value*numpy.ones((n,),dtype=theano.config.floatX)
+        self.Wx = theano.shared(numpy.concatenate(
+                    [uniform_weight(n_in,n_hidden) for i in range(4)],axis=1),
+                     borrow=True)
+        self.Ws = theano.shared(numpy.concatenate(
+                    [ortho_weight(n_hidden,rng) for i in range(4)],axis=1),
+                     borrow=True)
+        self.Wy = theano.shared(uniform_weight(n_hidden,n_out))
+        self.b = theano.shared(numpy.concatenate(
+                    [const_bias(n_hidden,0) for i in range(4)],axis=0),
+                     borrow=True)
+        self.by = theano.shared(const_bias(n_out,0))
+        
+        self.params = [self.Wx,self.Ws,self.Wy,self.b,self.by]
+        self.W = [self.Wx,self.Ws,self.Wy]
         self.L1 = numpy.sum([abs(w).sum() for w in self.W])
         self.L2 = numpy.sum([(w**2).sum() for w in self.W])
+        
+        # slice for doing step calculations in parallel
+        def _slice(x,n):
+            return x[:,n*self.n_hidden:(n+1)*self.n_hidden]        
+        
         # forward function
-        def forward(x_t,c_tm1,s_tm1,Wxi,Wsi,Wxf,Wsf,Wxo,Wso,Wxg,Wsg,Wsy,bi,bf,bo,bg,by):
-            i = sigmoid(T.dot(x_t,Wxi)+T.dot(s_tm1,Wsi)+bi)
-            f = sigmoid(T.dot(x_t,Wxf)+T.dot(s_tm1,Wsf)+bf)
-            o = sigmoid(T.dot(x_t,Wxo)+T.dot(s_tm1,Wso)+bo)
-            g = tanh(T.dot(x_t,Wxg)+T.dot(s_tm1,Wsg)+bg)
+        def forward(x_t,c_tm1,s_tm1,Wx,Ws,Wy,b,by):
+            preact = T.dot(x_t,Wx)+T.dot(s_tm1,Ws)+b
+            i = sigmoid(_slice(preact,0))
+            f = sigmoid(_slice(preact,1))
+            o = sigmoid(_slice(preact,2))
+            g = tanh(_slice(preact,3))
             c = c_tm1*f+g*i
             s = tanh(c)*o
-            y = softmax(T.dot(s,Wsy)+by)
+            y = softmax(T.dot(s,Wy)+by)
             return [c,s,y]
         c0 = T.alloc(T.zeros((self.n_hidden,),dtype=theano.config.floatX),x.shape[0],self.n_hidden)
         s0 = T.alloc(T.zeros((self.n_hidden,),dtype=theano.config.floatX),x.shape[0],self.n_hidden)
@@ -79,22 +92,22 @@ class lstm(object):
                                       outputs_info=[dict(initial=c0,taps=[-1]),
                                                     dict(initial=s0,taps=[-1]),
                                                     None],
-                                      non_sequences=[self.Wxi,self.Wsi,self.Wxf,self.Wsf,self.Wxo,self.Wso,self.Wxg, \
-                                                     self.Wsg,self.Wsy,self.bi,self.bf,self.bo,self.bg,self.by],
+                                      non_sequences=[self.Wx,self.Ws,self.Wy,
+                                                     self.b,self.by],
                                       strict=True)
-        self.output = y[-1] # train on last output only? (play with this later)
+        self.output = y
         self.pred = T.argmax(self.output,axis=1)
     
     # ----- Classification -----
     def crossentropy(self,y):
-        return T.mean(categorical_crossentropy(self.output,y))
+        return T.mean(categorical_crossentropy(self.output,y.dimshuffle([1,0,2])))
     
     def errors(self,y):
-        return T.mean(T.neq(self.pred,y))
+        return T.mean(T.neq(self.pred,y.dimshuffle([1,0,2])))
     
     # ----- Regression -----
     def mse(self,y):
-        return T.mean(T.sqr(T.sub(self.output,y)))
+        return T.mean(T.sqr(T.sub(self.output,y.dimshuffle([1,0,2]))))
 
 
 class dni(object):

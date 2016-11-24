@@ -36,6 +36,9 @@ def uniform_weight(n1,n2,rng=rng):
                                       size=(n1,n2))
                          ).astype(theano.config.floatX),borrow=True)
 
+def layer_norm(h,eps=1e-5):
+    return (h-T.mean(h,axis=1,keepdims=True))/(eps+T.std(h,axis=1,keepdims=True))
+
 class lstm(object):
     def __init__(self,x,n_in,n_hidden,n_out):
         self.x = x
@@ -263,11 +266,12 @@ class rnn_dni(object):
 
 
 class lstm_dni(object):
-    def __init__(self,n_in,n_hidden,n_out,steps,rng=rng):
+    def __init__(self,n_in,n_hidden,n_out,steps,norm=True,rng=rng):
         self.n_in = n_in
         self.n_hidden = n_hidden
         self.n_out = n_out
         self.steps = steps
+        self.norm = norm
         
         # initialize weights
         def ortho_weight(ndim,rng=rng):
@@ -337,8 +341,8 @@ class lstm_dni(object):
                 g = tanh(self._slice(preact,3))
                 c_t = c_tm1*f+g*i
                 s_t = tanh(c_t)*o
-                # try  adding layer normalization???
-                s_t = (s_t-T.mean(s_t,axis=1,keepdims=True))/(1e-5+T.std(s_t,axis=1,keepdims=True))
+                if self.norm:
+                    s_t = layer_norm(s_t)
                 output = softmax(T.dot(s_t,Wy)+by)
                 yo_t.append(output)
                 # update for next step
@@ -407,8 +411,8 @@ class lstm_dni(object):
             g = tanh(self._slice(preact,3))
             c_t = c_tm1*f+g*i
             s_t = tanh(c_t)*o
-            # try  adding layer normalization???
-            s_t = (s_t-T.mean(s_t,axis=1,keepdims=True))/(1e-5+T.std(s_t,axis=1,keepdims=True))
+            if self.norm:
+                    s_t = layer_norm(s_t)
             yo_t = softmax(T.dot(s_t,Wy)+by)
             loss_t = T.mean(categorical_crossentropy(yo_t,y_t))
             return c_t,s_t,yo_t,loss_t

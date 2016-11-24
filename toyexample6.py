@@ -11,6 +11,7 @@ Test the generally implemented RNN-DNI class in recurrent.py
 
 import numpy
 import timeit
+import sys
 
 import recurrent
 
@@ -89,6 +90,7 @@ def experiment(train_fcn,x_train,y_train,lr,lr_decay,batch_size,
              % (epoch,1000*(end_time-start_time)/x_train.shape[0]))
         print('Training loss  =  %f,   DNI error = %f, |dLdp| = %f, |dniJ| = %f' \
               % (loss_epoch,dni_err_epoch,dldp_l2_epoch,dniJ_l2_epoch))
+        sys.stdout.flush() # force print to appear
         loss.append(loss_epoch)
         dni_err.append(dni_err_epoch)
         dldp_l2.append(dldp_l2_epoch)
@@ -103,6 +105,7 @@ def experiment(train_fcn,x_train,y_train,lr,lr_decay,batch_size,
             val_loss_epoch += test_fcn(x_batch,y_batch)
         val_loss_epoch = val_loss_epoch/n_val_batches
         print('Validation loss = %f' % val_loss_epoch)
+        sys.stdout.flush() # force print to appear
         val_loss.append(val_loss_epoch)
         
         # early stopping
@@ -188,7 +191,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Run DNI experiments')
     parser.add_argument('--sequence_length',nargs='*',type=int,
-                        default=[3,5,10,15])
+                        default=[5,10,15])
     parser.add_argument('--pause',nargs='*',type=int,
                         default=[-1])
     parser.add_argument('--dni_steps',nargs='*',type=int,
@@ -210,7 +213,7 @@ if __name__ == "__main__":
             sequence_length = sequence_length[0]
         
 	   # make some data
-        n_in = 6 # one-hot encoding, n_in-2 words + pause + copy
+        n_in = 4 # one-hot encoding, n_in-2 words + pause + copy
         n_out = n_in-2
         n_train = 20*256
         n_val = 256
@@ -224,12 +227,13 @@ if __name__ == "__main__":
         # test dni
         lr_decay = 1
         n_epochs = 1000
-        patience = 50
+        patience = 10
         batch_size = 256 # from paper
         n_hidden = 256 # from paper
+        dni_scales = [0,0.1]
         
         final_results = []
-        for dni_scale in [1,0.1,0]:
+        for dni_scale in dni_scales:
             # run the experiment
             if model == 'rnn':
                 loss,dni_err,dldp_l2,dniJ_l2,val_loss = \

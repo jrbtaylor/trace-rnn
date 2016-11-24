@@ -90,7 +90,7 @@ class lstm(object):
     
     # ----- Classification -----
     def crossentropy(self,y):
-        return T.mean(categorical_crossentropy(self.output,y))
+        return T.mean(categorical_crossentropy(self.output,y.dimshuffle([1,0,2])))
     
     def errors(self,y):
         return T.mean(T.neq(self.pred,y))
@@ -165,7 +165,7 @@ class lstm_slice(object):
     
     # ----- Classification -----
     def crossentropy(self,y):
-        return T.mean(categorical_crossentropy(self.output,y))
+        return T.mean(categorical_crossentropy(self.output,y.dimshuffle([1,0,2])))
     
     def errors(self,y):
         return T.mean(T.neq(self.pred,y))
@@ -204,10 +204,6 @@ def data(n_in,n_train,n_val,sequence_length,pause):
         return x,y
     x_train,y_train = generate_data(n_train)
     x_val,y_val = generate_data(n_val)
-    print(x_train.shape)
-    print(y_train.shape)
-    print(x_val.shape)
-    print(y_val.shape)
     return [x_train,y_train,x_val,y_val]
 
 
@@ -233,7 +229,7 @@ def experiment(train_fcn,x_train,y_train,lr,lr_decay,batch_size,
             x_batch = x_train[batch_idx]
             y_batch = y_train[batch_idx]
             loss_batch = train_fcn(x_batch,y_batch,lr)
-            loss_epoch += loss_batch
+            loss_epoch += numpy.mean(loss_batch)
         loss_epoch = loss_epoch/n_train_batches
         end_time = timeit.default_timer()
         print('Epoch %d  -----  time per example (msec): %f' \
@@ -247,7 +243,7 @@ def experiment(train_fcn,x_train,y_train,lr,lr_decay,batch_size,
         for batch in range(n_val_batches):
             x_batch = x_val[batch*batch_size:(batch+1)*batch_size]
             y_batch = y_val[batch*batch_size:(batch+1)*batch_size]
-            val_loss_epoch += test_fcn(x_batch,y_batch)
+            val_loss_epoch += numpy.mean(test_fcn(x_batch,y_batch))
         val_loss_epoch = val_loss_epoch/n_val_batches
         print('Validation loss = %f' % val_loss_epoch)
         val_loss.append(val_loss_epoch)
@@ -299,7 +295,8 @@ def test_old(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,
                                          T.grad(model.crossentropy(y),
                                                 model.params)))
     test = theano.function(inputs=[x,y],
-                           outputs=[model.crossentropy(y)])
+                           outputs=model.crossentropy(y))
+    print('testing old LSTM implementation')
     return experiment(train,x_train,y_train,lr,lr_decay,batch_size,
                       test,x_val,y_val,n_epochs,patience)
 
@@ -310,12 +307,13 @@ def test_new(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,
     learning_rate = T.scalar('learning_rate')
     model = lstm_slice(x,n_in,n_hidden,n_out)
     train = theano.function(inputs=[x,y,learning_rate],
-                            outputs=[model.crossentropy(y)],
+                            outputs=model.crossentropy(y),
                             updates=adam(learning_rate,model.params,
                                          T.grad(model.crossentropy(y),
                                                 model.params)))
     test = theano.function(inputs=[x,y],
                            outputs=[model.crossentropy(y)])
+    print('testing new LSTM implementation')
     return experiment(train,x_train,y_train,lr,lr_decay,batch_size,
                       test,x_val,y_val,n_epochs,patience)
 
@@ -334,9 +332,10 @@ if __name__ == "__main__":
     lr = parser.parse_args().learnrate[0]
     model = parser.parse_args().model
     
-    n_in = 4 # n_in-2 words + pause + copy
+    n_in = 6 # n_in-2 words + pause + copy
     n_out = n_in-2
-    batch_size = 512
+    n_hidden = 256
+    batch_size = 256
     n_train = 20*batch_size
     n_val = batch_size
     pause = 1
@@ -345,7 +344,6 @@ if __name__ == "__main__":
     lr_decay = 0.95
     n_epochs = 100
     patience = 20
-    n_hidden = 32
     
     for m in model:
         if m=='old':

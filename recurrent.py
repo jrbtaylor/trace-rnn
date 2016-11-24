@@ -579,11 +579,12 @@ class rnn_trace(object):
 
 
 class lstm_trace(object):
-    def __init__(self,n_in,n_hidden,n_out,steps,rng=rng):
+    def __init__(self,n_in,n_hidden,n_out,steps,norm=True,rng=rng):
         self.n_in = n_in
         self.n_hidden = n_hidden
         self.n_out = n_out
         self.steps = steps
+        self.norm = norm
         
         # initialize weights
         def ortho_weight(ndim,rng=rng):

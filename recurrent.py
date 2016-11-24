@@ -670,6 +670,8 @@ class lstm_trace(object):
                 g = tanh(self._slice(preact,3))
                 c_t = c_tm1*f+g*i
                 s_t = tanh(c_t)*o
+                if self.norm:
+                    s_t = layer_norm(s_t)
                 preact_y = T.dot(s_t,Wy)
                 output = softmax(preact_y+by)
                 yo_t.append(output)
@@ -756,6 +758,8 @@ class lstm_trace(object):
             g = tanh(self._slice(preact,3))
             c_t = c_tm1*f+g*i
             s_t = tanh(c_t)*o
+            if self.norm:
+                    s_t = layer_norm(s_t)
             yo_t = softmax(T.dot(s_t,Wy)+by)
             loss_t = T.mean(categorical_crossentropy(yo_t,y_t))
             return c_t,s_t,yo_t,loss_t

@@ -36,8 +36,11 @@ def uniform_weight(n1,n2,rng=rng):
                                       size=(n1,n2))
                          ).astype(theano.config.floatX),borrow=True)
 
-def layer_norm(h,eps=1e-5):
-    return (h-T.mean(h,axis=1,keepdims=True))/(eps+T.std(h,axis=1,keepdims=True))
+def layer_norm(h,beta=0,eps=1e-5):
+    # beta mixes the original distribution with the normalized one
+    mean = T.mean(h,axis=1,keepdims=True)
+    std = T.std(h,axis=1,keepdims=True)
+    return (h-(1-beta)*mean)*(1*(1-beta)+beta*std)/(eps+std)
 
 class lstm(object):
     def __init__(self,x,n_in,n_hidden,n_out):
@@ -144,8 +147,10 @@ class dni(object):
         
         def output(self,x):
             next_input = x
-            for n in range(self.n_layers):
+            for n in range(self.n_layers-1):
                 next_input = relu(T.dot(next_input,self.W[n])+self.b[n])
+            # last layer is linear
+            next_input = T.dot(next_input,self.W[-1])+self.b[-1]
             return next_input
     
 class rnn_dni(object):
@@ -283,17 +288,26 @@ class lstm_dni(object):
             return rng.uniform(low=-limit,high=limit,size=(n1,n2)).astype(theano.config.floatX)
         def const_bias(n,value=0):
             return value*numpy.ones((n,),dtype=theano.config.floatX)
-        self.Wx = theano.shared(numpy.concatenate(
-                    [uniform_weight(n_in,n_hidden) for i in range(4)],axis=1),
-                     borrow=True)
-        self.Wh = theano.shared(numpy.concatenate(
-                    [ortho_weight(n_hidden,rng) for i in range(4)],axis=1),
-                     borrow=True)
-        self.Wy = theano.shared(uniform_weight(n_hidden,n_out))
-        self.b = theano.shared(numpy.concatenate(
-                    [const_bias(n_hidden,0) for i in range(4)],axis=0),
-                     borrow=True)
-        self.by = theano.shared(const_bias(n_out,0))
+        self.Wxi = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Wxf = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Wxo = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Wxg = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Wx = T.concatenate([self.Wxi,self.Wxf,self.Wxo,self.Wxg],
+                                axis=1)
+        self.Whi = theano.shared(ortho_weight(n_hidden,rng),borrow=True)
+        self.Whf = theano.shared(ortho_weight(n_hidden,rng),borrow=True)
+        self.Who = theano.shared(ortho_weight(n_hidden,rng),borrow=True)
+        self.Whg = theano.shared(ortho_weight(n_hidden,rng),borrow=True)
+        self.Wh = T.concatenate([self.Whi,self.Whf,self.Who,self.Whg],
+                                axis=1)
+        self.Wy = theano.shared(uniform_weight(n_hidden,n_out),borrow=True)
+        
+        self.bi = theano.shared(const_bias(n_hidden,0),borrow=True)
+        self.bf = theano.shared(const_bias(n_hidden,0),borrow=True)
+        self.bo = theano.shared(const_bias(n_hidden,0),borrow=True)
+        self.bg = theano.shared(const_bias(n_hidden,0),borrow=True)
+        self.b = T.concatenate([self.bi,self.bf,self.bo,self.bg],axis=0)
+        self.by = theano.shared(const_bias(n_out,0),borrow=True)
         
         self.params = [self.Wx,self.Wh,self.Wy,self.b,self.by]
         self.W = [self.Wx,self.Wh,self.Wy]
@@ -301,7 +315,7 @@ class lstm_dni(object):
         self.L2 = numpy.sum([(w**2).sum() for w in self.W])
         
         # initialize DNI
-        self.dni = dni(n_hidden,n_hidden,2)
+        self.dni = dni(n_hidden,2*n_hidden,2)
     
     # slice for doing step calculations in parallel
     def _slice(self,x,n):
@@ -340,7 +354,9 @@ class lstm_dni(object):
                 o = sigmoid(self._slice(preact,2))
                 g = tanh(self._slice(preact,3))
                 c_t = c_tm1*f+g*i
-                h_t = tanh(c_t)*o
+#                if self.norm:
+#                    c_t = layer_norm(c_t)
+                h_t = c_t*o
                 if self.norm:
                     h_t = layer_norm(h_t)
                 output = softmax(T.dot(h_t,Wy)+by)
@@ -355,25 +371,50 @@ class lstm_dni(object):
             up_dni_l2 = 0
             # Train the LSTM: backprop (loss + DNI output)
             dni_out = self.dni.output(h_t)
+            dni_out_h = self._slice(dni_out,0)
+            dni_out_c = self._slice(dni_out,1)
             grads = []
-            for param in self.params:
+            params = [] # params to Adam need to be in same order as grads 
+            # output weights don't have dni feedback
+            for param in [self.Wy,self.by]:
                 dlossdparam = T.grad(loss,param)
-                dniJ = T.Lop(h_t,param,dni_out,disconnected_inputs='ignore')
+                grads.append(dlossdparam)
+                params.append(param)
+            # output-gate weights get dni_h
+            for param in [self.Wxo,self.Who,self.bo]:
+                dlossdparam = T.grad(loss,param)
+                dniJ = T.Lop(h_t,param,dni_out_h)
+                grads.append(dlossdparam+scale*dniJ)
+                params.append(param)
                 up_dldp_l2 += T.sum(T.square(dlossdparam))
                 up_dni_l2 += T.sum(T.square(dniJ))
-                grads.append(dlossdparam+scale*dniJ)
+            # all other gates get dni_c
+            for param in [self.Wxi,self.Wxf,self.Wxg,
+                          self.Whi,self.Whf,self.Whg,
+                          self.bi,self.bf,self.bg]:
+                dlossparam = T.grad(loss,param)
+                dniJ = T.Lop(c_t,param,dni_out_c)
+                grads.append(dlossparam+scale*dniJ)
+                params.append(param)
+                up_dldp_l2 += T.sum(T.square(dlossdparam))
+                up_dni_l2 += T.sum(T.square(dniJ))
             
             # Update the DNI (from the last step)
             # recalculate the DNI prediction since it can't be passed
-            dni_out_old =self.dni.output(h_tmT)
+            dni_out_old = self.dni.output(h_tmT)
+            dni_old_h = self._slice(dni_out_old,0)
+            dni_old_c = self._slice(dni_out_old,1)
             # dni target: current loss backprop'ed + new dni backprop'ed
-            dni_target = T.grad(loss,h_tmT) \
-                         +T.Lop(h_t,h_tmT,dni_out)
-            dni_error = T.sum(T.square(dni_out_old-dni_target))
+            dni_target_h = T.grad(loss,h_tmT) \
+                           +T.Lop(h_t,h_tmT,dni_out_h)
+            dni_target_c = T.grad(loss,c_tmT) \
+                           +T.Lop(c_t,c_tmT,dni_out_c)
+            dni_error = T.sum(T.square(dni_old_h-dni_target_h)) \
+                        +T.sum(T.square(dni_old_c-dni_target_c))
             for param in self.dni.params:
                 grads.append(T.grad(dni_error,param))
             
-            updates = adam(lr,self.params+self.dni.params,grads)
+            updates = adam(lr,params+self.dni.params,grads)
             
             return [c_t,h_t,loss,dni_error,
                     T.sqrt(up_dldp_l2),T.sqrt(up_dni_l2)],updates
@@ -410,7 +451,9 @@ class lstm_dni(object):
             o = sigmoid(self._slice(preact,2))
             g = tanh(self._slice(preact,3))
             c_t = c_tm1*f+g*i
-            h_t = tanh(c_t)*o
+#            if self.norm:
+#                    c_t = layer_norm(c_t)
+            h_t = c_t*o
             if self.norm:
                     h_t = layer_norm(h_t)
             yo_t = softmax(T.dot(h_t,Wy)+by)

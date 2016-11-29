@@ -29,7 +29,7 @@ def data(n_in,n_train,n_val,sequence_length,pause):
     rng = numpy.random.RandomState(1)
     def generate_data(examples):
         x = numpy.zeros((examples,2*sequence_length+pause+1,n_in),dtype='float32')
-        y = numpy.zeros((examples,2*sequence_length+pause+1,n_in-2),dtype='float32')
+        y = numpy.zeros((examples,2*sequence_length+pause+1,n_in-1),dtype='float32')
         for ex in range(examples):
             # original sequence
             oneloc = rng.randint(0,n_in-2,size=(sequence_length))
@@ -40,7 +40,9 @@ def data(n_in,n_train,n_val,sequence_length,pause):
             x[ex,sequence_length+pause,n_in-1] = 1
             # blank characters during copy
             x[ex,sequence_length+pause+1+numpy.arange(sequence_length),n_in-2] = 1
-            # output
+            # output is blank character until copy character is input
+            y[ex,numpy.arange(sequence_length+pause+1),n_in-2] = 1
+            # repeat the original sequence
             y[ex,sequence_length+pause+1+numpy.arange(sequence_length),oneloc] = 1
         return x,y
     x_train,y_train = generate_data(n_train)
@@ -52,7 +54,7 @@ def data(n_in,n_train,n_val,sequence_length,pause):
 # Experiments
 # -----------------------------------------------------------------------------
 
-def experiment(train_fcn,x_train,y_train,lr,lr_decay,batch_size,
+def experiment(train_fcn,x_train,y_train,lr,lr_decay,dni_scale,batch_size,
                test_fcn,x_val,y_val,n_epochs,patience):
     loss = []
     dni_err = []
@@ -68,6 +70,12 @@ def experiment(train_fcn,x_train,y_train,lr,lr_decay,batch_size,
     while epoch<n_epochs and patience>0:
         start_time = timeit.default_timer()
         
+        # turn the dni off for the start of training
+        if epoch<4:
+            dni_scale_epoch = 0
+        else:
+            dni_scale_epoch = dni_scale
+        
         # train
         loss_epoch = 0
         dni_err_epoch = 0
@@ -79,7 +87,11 @@ def experiment(train_fcn,x_train,y_train,lr,lr_decay,batch_size,
             batch_idx = train_idx[batch*batch_size:(batch+1)*batch_size]
             x_batch = x_train[batch_idx]
             y_batch = y_train[batch_idx]
-            loss_batch,dni_err_batch,dldp_l2_batch,dniJ_l2_batch = train_fcn(x_batch,y_batch,lr)
+            loss_batch,dni_err_batch, \
+                dldp_l2_batch,dniJ_l2_batch = train_fcn(x_batch,
+                                                        y_batch,
+                                                        lr,
+                                                        dni_scale_epoch)
             loss_epoch += loss_batch
             dni_err_epoch += dni_err_batch
             dldp_l2_epoch += dldp_l2_batch
@@ -150,9 +162,9 @@ def test_dni(x_train,y_train,x_val,y_val,
              n_in,n_hidden,n_out,steps,dni_scale,
              lr,lr_decay,batch_size,n_epochs,patience):
     model = recurrent.rnn_dni(n_in,n_hidden,n_out,steps)
-    train = lambda x,y,l: model.train()(x,y,l,dni_scale)
+    train = model.train()
     test = model.test()
-    return experiment(train,x_train,y_train,lr,lr_decay,batch_size,
+    return experiment(train,x_train,y_train,lr,lr_decay,dni_scale,batch_size,
                       test,x_val,y_val,n_epochs,patience)
 
 def test_dni_trace(x_train,y_train,x_val,y_val,
@@ -160,18 +172,19 @@ def test_dni_trace(x_train,y_train,x_val,y_val,
              lr,lr_decay,batch_size,n_epochs,patience):
     model = recurrent.rnn_trace(n_in,n_hidden,n_out,steps)
     trace_decay = 0.9
-    train = lambda x,y,l: model.train()(x,y,l,dni_scale,trace_decay)
+    model_train = model.train()
+    train = lambda x,y,l,d: model_train(x,y,l,d,trace_decay)
     test = model.test()
-    return experiment(train,x_train,y_train,lr,lr_decay,batch_size,
+    return experiment(train,x_train,y_train,lr,lr_decay,dni_scale,batch_size,
                       test,x_val,y_val,n_epochs,patience)
 
 def test_lstm_dni(x_train,y_train,x_val,y_val,
              n_in,n_hidden,n_out,steps,dni_scale,
              lr,lr_decay,batch_size,n_epochs,patience):
     model = recurrent.lstm_dni(n_in,n_hidden,n_out,steps)
-    train = lambda x,y,l: model.train()(x,y,l,dni_scale)
+    train = model.train()
     test = model.test()
-    return experiment(train,x_train,y_train,lr,lr_decay,batch_size,
+    return experiment(train,x_train,y_train,lr,lr_decay,dni_scale,batch_size,
                       test,x_val,y_val,n_epochs,patience)
 
 def test_lstm_trace(x_train,y_train,x_val,y_val,
@@ -179,9 +192,10 @@ def test_lstm_trace(x_train,y_train,x_val,y_val,
              lr,lr_decay,batch_size,n_epochs,patience):
     model = recurrent.lstm_trace(n_in,n_hidden,n_out,steps)
     trace_decay = 0.9
-    train = lambda x,y,l: model.train()(x,y,l,dni_scale,trace_decay)
+    model_train = model.train()
+    train = lambda x,y,l,d: model_train(x,y,l,d,trace_decay)
     test = model.test()
-    return experiment(train,x_train,y_train,lr,lr_decay,batch_size,
+    return experiment(train,x_train,y_train,lr,lr_decay,dni_scale,batch_size,
                       test,x_val,y_val,n_epochs,patience)
 
 
@@ -214,7 +228,7 @@ if __name__ == "__main__":
         
 	   # make some data
         n_in = 4 # one-hot encoding, n_in-2 words + pause + copy
-        n_out = n_in-2
+        n_out = n_in-1 # n_in-2 words + blank
         n_train = 20*256
         n_val = 256
         # note: total sequence length is 2*sequence_length+pause+1
@@ -227,10 +241,10 @@ if __name__ == "__main__":
         # test dni
         lr_decay = 1
         n_epochs = 1000
-        patience = 10
+        patience = 100
         batch_size = 256 # from paper
         n_hidden = 256 # from paper
-        dni_scales = [0,0.1]
+        dni_scales = [0.1]
         
         final_results = []
         for dni_scale in dni_scales:

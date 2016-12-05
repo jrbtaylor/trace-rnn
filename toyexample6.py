@@ -178,6 +178,15 @@ def test_dni_trace(x_train,y_train,x_val,y_val,
     return experiment(train,x_train,y_train,lr,lr_decay,dni_scale,batch_size,
                       test,x_val,y_val,n_epochs,patience)
 
+def test_gru_dni(x_train,y_train,x_val,y_val,
+             n_in,n_hidden,n_out,steps,dni_scale,
+             lr,lr_decay,batch_size,n_epochs,patience):
+    model = recurrent.gru_dni(n_in,n_hidden,n_out,steps)
+    train = model.train()
+    test = model.test()
+    return experiment(train,x_train,y_train,lr,lr_decay,dni_scale,batch_size,
+                      test,x_val,y_val,n_epochs,patience)
+
 def test_lstm_dni(x_train,y_train,x_val,y_val,
              n_in,n_hidden,n_out,steps,dni_scale,
              lr,lr_decay,batch_size,n_epochs,patience):
@@ -205,13 +214,13 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Run DNI experiments')
     parser.add_argument('--sequence_length',nargs='*',type=int,
-                        default=[5,10,15])
+                        default=[10])
     parser.add_argument('--pause',nargs='*',type=int,
                         default=[-1])
     parser.add_argument('--dni_steps',nargs='*',type=int,
                         default=[2])
     parser.add_argument('--learnrate',nargs='*',type=float,
-                        default=[7e-5])
+                        default=[7e-4])
     parser.add_argument('--model',nargs='*',type=str,
                         default=['lstm'])
     sequence_lengths = parser.parse_args().sequence_length
@@ -239,7 +248,7 @@ if __name__ == "__main__":
                                            sequence_length,pause)
         
         # test dni
-        lr_decay = 1
+        lr_decay = 0.995
         n_epochs = 1000
         patience = 100
         batch_size = 256 # from paper
@@ -256,6 +265,10 @@ if __name__ == "__main__":
             elif model == 'rnn_trace':
                 loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
                     test_dni_trace(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,steps,dni_scale,
+                             lr,lr_decay,batch_size,n_epochs,patience)
+            elif model == 'gru':
+                loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
+                    test_gru_dni(x_train,y_train,x_val,y_val,n_in,n_hidden,n_out,steps,dni_scale,
                              lr,lr_decay,batch_size,n_epochs,patience)
             elif model == 'lstm':
                 loss,dni_err,dldp_l2,dniJ_l2,val_loss = \

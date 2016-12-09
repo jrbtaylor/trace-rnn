@@ -220,7 +220,7 @@ if __name__ == "__main__":
     parser.add_argument('--dni_steps',nargs='*',type=int,
                         default=[2])
     parser.add_argument('--learnrate',nargs='*',type=float,
-                        default=[7e-4])
+                        default=[7e-5])
     parser.add_argument('--model',nargs='*',type=str,
                         default=['lstm'])
     sequence_lengths = parser.parse_args().sequence_length

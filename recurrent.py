@@ -36,12 +36,23 @@ def uniform_weight(n1,n2,rng=rng):
                                       size=(n1,n2))
                          ).astype(theano.config.floatX),borrow=True)
 
-def layer_norm(h,scale,shift,eps=1e-5):
-    # beta mixes the original distribution with the normalized one
-    mean = T.mean(h,axis=1,keepdims=True)
+def layer_norm(h,scale=1,shift=0,eps=1e-5):
+    mean = T.mean(h,axis=1,keepdims=True,dtype=theano.config.floatX)
     std = T.std(h,axis=1,keepdims=True)
     normed = (h-mean)/(eps+std)
-    return (scale*normed+shift)
+    return scale*normed+shift
+    
+def dropout(h,p,rng=rng):
+    srng = theano.tensor.shared_randomstreams.RandomStreams(rng.randint(99999))
+    mask = T.cast(srng.binomial(n=1,p=1-p,size=h.shape),theano.config.floatX)
+    # rescale activations at train time to avoid rescaling weights at test
+    h = h/(1-p)
+    return h*mask
+
+def zoneout(h_t,h_tm1,p,rng=rng):
+    srng = theano.tensor.shared_randomstreams.RandomStreams(rng.randint(99999))
+    mask = T.cast(srng.binomial(n=1,p=1-p,size=h_t.shape),theano.config.floatX)
+    return h_t*mask+h_tm1*(1-mask)
 
 class lstm(object):
     def __init__(self,x,n_in,n_hidden,n_out):
@@ -149,7 +160,8 @@ class gru(object):
         self.by = theano.shared(const_bias(n_out,0),borrow=True)
         self.bg = theano.shared(const_bias(n_hidden,0),borrow=True)
         
-        self.params = [self.Wx,self.Wh,self.Wy,self.b,self.by]
+        self.params = [self.Wx,self.Wh,self.Wxg,self.Whg,self.Wy,
+                       self.b,self.by,self.bg]
         self.W = [self.Wx,self.Wh,self.Wy]
         self.L1 = numpy.sum([abs(w).sum() for w in self.W])
         self.L2 = numpy.sum([(w**2).sum() for w in self.W])
@@ -346,7 +358,8 @@ class rnn_dni(object):
 
 
 class gru_dni(object):
-    def __init__(self,n_in,n_hidden,n_out,steps,norm=True,rng=rng):
+    def __init__(self,n_in,n_hidden,n_out,steps,
+                 norm=True,p_zoneout=-1,p_dropout=-1,gradclip=10,rng=rng):
         """
         GRU with a DNI every 'steps' timesteps
         """
@@ -356,6 +369,9 @@ class gru_dni(object):
         self.n_out = n_out
         self.steps = steps
         self.norm = norm
+        self.p_zoneout = p_zoneout
+        self.p_dropout = p_dropout
+        self.gradclip = gradclip
         
         # initialize weights
         def ortho_weight(ndim,rng=rng):
@@ -367,30 +383,45 @@ class gru_dni(object):
             return rng.uniform(low=-limit,high=limit,size=(n1,n2)).astype(theano.config.floatX)
         def const_bias(n,value=0):
             return value*numpy.ones((n,),dtype=theano.config.floatX)
-        self.Wx = theano.shared(numpy.concatenate(
-                    [uniform_weight(n_in,n_hidden) for i in range(2)],axis=1),
-                     borrow=True)
-        self.Wh = theano.shared(numpy.concatenate(
-                    [ortho_weight(n_hidden,rng) for i in range(2)],axis=1),
-                     borrow=True)
+        
+        self.Wxz = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Wxr = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
         self.Wxg = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Whz = theano.shared(ortho_weight(n_hidden),borrow=True)
+        self.Whr = theano.shared(ortho_weight(n_hidden),borrow=True)
         self.Whg = theano.shared(ortho_weight(n_hidden),borrow=True)
         self.Wy = theano.shared(uniform_weight(n_hidden,n_out),borrow=True)
-        self.b = theano.shared(numpy.concatenate(
-                    [const_bias(n_hidden,0) for i in range(2)],axis=0),
-                     borrow=True)
-        self.by = theano.shared(const_bias(n_out,0),borrow=True)
+
+        self.bz = theano.shared(const_bias(n_hidden,0),borrow=True)
+        self.br = theano.shared(const_bias(n_hidden,1),borrow=True)
         self.bg = theano.shared(const_bias(n_hidden,0),borrow=True)
+        self.by = theano.shared(const_bias(n_out,0),borrow=True)
         
-        self.params = [self.Wx,self.Wh,self.Wy,self.b,self.by]
+        
+        self.params = [self.Wxz,self.Wxr,self.Wxg,self.Whz,self.Whr,self.Whg,
+                       self.Wy,self.bz,self.br,self.bg,self.by]
+        # train some parameters without the dni backprop
+        self.use_dni = [True]*len(self.params)
         
         if self.norm:
-            self.scale = theano.shared(numpy.ones((self.n_hidden),
-                                                   dtype=theano.config.floatX))
-            self.shift = theano.shared(numpy.zeros((self.n_hidden),
-                                                   dtype=theano.config.floatX))
-            self.params.append(self.scale)
-            self.params.append(self.shift)
+            # because of where layer normalization is used, no need for shifts
+            self.scale1 = theano.shared(const_bias(n_hidden,0.5),borrow=True)
+            self.scale2 = theano.shared(const_bias(n_hidden,0.5),borrow=True)
+            self.scale3 = theano.shared(const_bias(n_hidden,0.5),borrow=True)
+            self.scale4 = theano.shared(const_bias(n_hidden,0.5),borrow=True)
+            self.scale5 = theano.shared(const_bias(n_hidden,0.5),borrow=True)
+            self.scale6 = theano.shared(const_bias(n_hidden,0.5),borrow=True)
+            self.params = self.params+[self.scale1,self.scale2,self.scale3,
+                                       self.scale4,self.scale5,self.scale6]
+            self.use_dni = self.use_dni+[True]*6
+            
+            # if using layer norm, initial hidden state h0 needs var>0
+            # using a stable value rather than random helps w/ training
+            h0 = numpy.zeros((n_hidden,),dtype=theano.config.floatX)
+            h0[0] = 1
+            self.h0 = theano.shared(h0,borrow=True)
+        else:
+            self.h0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
         
         # initialize DNI
         self.dni = dni(n_hidden,n_hidden,2)
@@ -417,7 +448,7 @@ class gru_dni(object):
         
         # step takes a set of inputs over self.steps time-steps
         def step(x_t,y_t,h_tmT,
-                 Wx,Wh,Wxg,Whg,Wy,b,bg,by,
+                 Wxz,Whz,Wxr,Whr,Wxg,Whg,Wy,bz,br,bg,by,
                  lr,scale):
             
             # manually build the graph for the inner loop
@@ -426,15 +457,27 @@ class gru_dni(object):
             h_tm1 = h_tmT
             loss = 0
             for t in range(self.steps):
-                preact = T.dot(x_t[t],Wx)+T.dot(h_tm1,Wh)+b
-                z = sigmoid(self._slice(preact,0))
-                r = sigmoid(self._slice(preact,1))
-                g = T.dot(x_t[t],Wxg)+T.dot(r*h_tm1,Whg)+bg
                 if self.norm:
-                    g = layer_norm(g,self.scale,self.shift)
-                g = tanh(g)
+                    z = sigmoid(layer_norm(T.dot(x_t[t],Wxz),self.scale1) \
+                                +layer_norm(T.dot(h_tm1,Whz),self.scale2)+bz)
+                    r = sigmoid(layer_norm(T.dot(x_t[t],Wxr),self.scale3) \
+                                +layer_norm(T.dot(h_tm1,Whr),self.scale4)+br)
+                    g = tanh(layer_norm(T.dot(x_t[t],Wxg),self.scale5) \
+                            +layer_norm(T.dot(r*h_tm1,Whg),self.scale6)+bg)
+                else:
+                    z = sigmoid(T.dot(x_t[t],Wxz)+T.dot(h_tm1,Whz)+bz)
+                    r = sigmoid(T.dot(x_t[t],Wxr)+T.dot(h_tm1,Whr)+br)
+                    g = tanh(T.dot(x_t[t],Wxg)+T.dot(r*h_tm1,Whg)+bg)
                 h_t = (1-z)*h_tm1+z*g
-                output = softmax(T.dot(h_t,Wy)+by)
+                if self.p_zoneout>0:
+                    h_t = zoneout(h_t,h_tm1,self.p_zoneout)
+                h_t = theano.gradient.grad_clip(h_t,
+                                                -self.gradclip,
+                                                self.gradclip)
+                if self.p_dropout>0:
+                    output = softmax(T.dot(dropout(h_t,self.p_dropout),Wy)+by)
+                else:
+                    output = softmax(T.dot(h_t,Wy)+by)
                 yo_t.append(output)
                 h_tm1 = h_t
                 loss += T.mean(categorical_crossentropy(output,y_t[t]))
@@ -445,19 +488,21 @@ class gru_dni(object):
             # Train the GRU: backprop (loss + DNI output)
             dni_out = self.dni.output(h_t)
             grads = []
-            for param in self.params:
+            for param,use_dni in zip(self.params,self.use_dni):
                 dlossdparam = T.grad(loss,param)
-                dniJ = T.Lop(h_t,param,dni_out,disconnected_inputs='ignore')
                 up_dldp_l2 += T.sum(T.square(dlossdparam))
-                up_dni_l2 += T.sum(T.square(dniJ))
-                grads.append(dlossdparam+scale*dniJ)
+                if use_dni:
+                    dniJ = T.Lop(h_t,param,dni_out,disconnected_inputs='ignore')
+                    up_dni_l2 += T.sum(T.square(dniJ))
+                    dlossdparam = dlossdparam+scale*dniJ
+                grads.append(dlossdparam)
             
             # Update the DNI (from the last step)
             # recalculate the DNI prediction since it can't be passed
             dni_out_old =self.dni.output(h_tmT)
             # dni target: current loss backprop'ed + new dni backprop'ed
             dni_target = T.grad(loss,h_tmT) \
-                         +T.Lop(h_t,h_tmT,dni_out)
+                         +scale*T.Lop(h_t,h_tmT,dni_out)
             dni_error = T.sum(T.square(dni_out_old-dni_target))
             for param in self.dni.params:
                 grads.append(T.grad(dni_error,param))
@@ -465,15 +510,14 @@ class gru_dni(object):
             updates = adam(lr,self.params+self.dni.params,grads)
             
             return [h_t,loss,dni_error,T.sqrt(up_dldp_l2),T.sqrt(up_dni_l2)],updates
-            
-        h0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
+        
         [h,seq_loss,seq_dni_error,up_dldp,up_dni],updates = theano.scan(fn=step, 
                              sequences=[shufflereshape(x),
                                         shufflereshape(y)],
-                             outputs_info=[T.alloc(h0,x.shape[0],self.n_hidden),
+                             outputs_info=[T.alloc(self.h0,x.shape[0],self.n_hidden),
                                            None,None,None,None],
-                             non_sequences=[self.Wx,self.Wh,self.Wxg,self.Whg,self.Wy,
-                                            self.b,self.bg,self.by,
+                             non_sequences=[self.Wxz,self.Whz,self.Wxr,self.Whr,self.Wxg,self.Whg,
+                                            self.Wy,self.bz,self.br,self.bg,self.by,
                                             learning_rate,dni_scale])
         return theano.function(inputs=[x,y,learning_rate,dni_scale],
                                outputs=[T.mean(seq_loss),
@@ -485,26 +529,29 @@ class gru_dni(object):
         x = T.tensor3('x')
         y = T.tensor3('y')
         
-        def step(x_t,y_t,h_tm1,Wx,Wh,Wxg,Whg,Wy,b,bg,by):
-            preact = T.dot(x_t,Wx)+T.dot(h_tm1,Wh)+b
-            z = sigmoid(self._slice(preact,0))
-            r = sigmoid(self._slice(preact,1))
-            g = T.dot(x_t,Wxg)+T.dot(r*h_tm1,Whg)+bg
+        def step(x_t,y_t,h_tm1,Wxz,Whz,Wxr,Whr,Wxg,Whg,Wy,bz,br,bg,by):
             if self.norm:
-                g = layer_norm(g,self.scale,self.shift)
-            g = tanh(g)
+                z = sigmoid(layer_norm(T.dot(x_t,Wxz),self.scale1) \
+                            +layer_norm(T.dot(h_tm1,Whz),self.scale2)+bz)
+                r = sigmoid(layer_norm(T.dot(x_t,Wxr),self.scale3) \
+                            +layer_norm(T.dot(h_tm1,Whr),self.scale4)+br)
+                g = tanh(layer_norm(T.dot(x_t,Wxg),self.scale5) \
+                        +layer_norm(T.dot(r*h_tm1,Whg),self.scale6)+bg)
+            else:
+                z = sigmoid(T.dot(x_t,Wxz)+T.dot(h_tm1,Whz)+bz)
+                r = sigmoid(T.dot(x_t,Wxr)+T.dot(h_tm1,Whr)+br)
+                g = tanh(T.dot(x_t,Wxg)+T.dot(r*h_tm1,Whg)+bg)
             h_t = (1-z)*h_tm1+z*g
             yo_t = softmax(T.dot(h_t,Wy)+by)
             loss_t = T.mean(categorical_crossentropy(yo_t,y_t))
             return h_t,yo_t,loss_t
-        h0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
         [h,yo,loss],_ = theano.scan(fn=step, 
                              sequences=[x.dimshuffle([1,0,2]),
                                         y.dimshuffle([1,0,2])],
-                             outputs_info=[T.alloc(h0,x.shape[0],self.n_hidden),
+                             outputs_info=[T.alloc(self.h0,x.shape[0],self.n_hidden),
                                            None,None],
-                             non_sequences=[self.Wx,self.Wh,self.Wxg,self.Whg,self.Wy,
-                                            self.b,self.bg,self.by])
+                             non_sequences=[self.Wxz,self.Whz,self.Wxr,self.Whr,self.Wxg,self.Whg,
+                                            self.Wy,self.bz,self.br,self.bg,self.by])
         loss = T.mean(loss)
         return theano.function(inputs=[x,y],
                                outputs=loss)

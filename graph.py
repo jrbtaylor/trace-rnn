@@ -78,7 +78,10 @@ def make_graph(csvfile,metric,title,saveto,rows_to_plot=[],hyperparam_idx=0):
                                 if i!=numpy.nanargmax(ymaxs)]
             if ylim > 10*numpy.nanmax(everythingelse):
                 ylim = numpy.nanmax(everythingelse)
-            plt.ylim(0,ylim)
+            plt.ylim(0,1.05*ylim)
+        else:
+            ylim = numpy.nanmax(data)
+            plt.ylim(0,1.05*ylim)
         plt.legend(title=categories[hyperparam_idx])
         
         # save it

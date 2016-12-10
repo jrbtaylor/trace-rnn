@@ -65,9 +65,7 @@ def experiment(train_fcn,lr,lr_decay,dni_scale,batch_size,
     epoch = 0
     train_idx = range(n_train)
     
-    # generate first dataset for seqlen = 1
     seqlen = 1
-    x_train,y_train,x_val,y_val = data(n_in,n_train,n_val,seqlen,0)   
     init_patience = patience
     while patience>0:
         start_time = timeit.default_timer()
@@ -77,6 +75,9 @@ def experiment(train_fcn,lr,lr_decay,dni_scale,batch_size,
             dni_scale_epoch = 0
         else:
             dni_scale_epoch = dni_scale
+        
+        # re-generate data at each epoch (essential as seqlen>10)
+        x_train,y_train,x_val,y_val = data(n_in,n_train,n_val,seqlen,0)   
         
         # train
         loss_epoch = 0
@@ -173,54 +174,67 @@ def test_gru_dni(n_in,n_hidden,n_out,dni_steps,dni_scale,
     return experiment(train,lr,lr_decay,dni_scale,batch_size,
                       test,n_train,n_val,patience)
 
+def test_gru_trace(n_in,n_hidden,n_out,dni_steps,dni_scale,
+                   lr,lr_decay,n_train,n_val,batch_size,patience):
+    model = recurrent.gru_trace(n_in,n_hidden,n_out,dni_steps)
+    tr_decay = 0.95
+    model_train = model.train()
+    train = lambda x,y,l,d: model_train(x,y,l,d,tr_decay)
+    test = model.test()
+    return experiment(train,lr,lr_decay,dni_scale,batch_size,
+                      test,n_train,n_val,patience)
+
 if __name__ == "__main__":
     import graph
+    import itertools
     import argparse
     parser = argparse.ArgumentParser(description='Run DNI experiments')
     parser.add_argument('--dni_steps',nargs='*',type=int,
                         default=[1])
     parser.add_argument('--learnrate',nargs='*',type=float,
                         default=[7e-5])
-    parser.add_argument('--model',nargs='*',type=str,
-                        default=['gru'])
+    parser.add_argument('--models',nargs='*',type=str,
+                        default=['gru_trace'])
     dni_steps = parser.parse_args().dni_steps
     lr = parser.parse_args().learnrate[0]
-    model = parser.parse_args().model[0]
-    
-
-    if type(dni_steps)==list:
-        dni_steps = dni_steps[0]
+    models = parser.parse_args().models
     
     # make some data
     n_in = 4 # one-hot encoding, n_in-2 words + pause + copy
     n_out = n_in-1 # n_in-2 words + blank
     n_train = 20*256
     n_val = 256
-       
+    
     # test dni
     lr_decay = 0.995
-    patience = 100
+    patience = 500
     batch_size = 256 # from paper
     n_hidden = 256 # from paper
-    dni_scales = [0,0.1]
+    dni_scales = [0,0.1,1]
     
-    final_results = []
-    for dni_scale in dni_scales:
-        # run the experiment
-        if model == 'gru':
-            seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
-                test_gru_dni(n_in,n_hidden,n_out,dni_steps,dni_scale,
-                             lr,lr_decay,n_train,n_val,batch_size,patience)
-        else:
-            print('unknown model type')
-        
-        # log the result
-        filename = model+'_copytest_DNI'+str(dni_steps)
-        log_results(filename,0,seqlen,dni_steps,dni_scale,n_in,n_hidden,n_out,
-                loss,dni_err,dldp_l2,dniJ_l2,val_loss)
-        
-        # make graphs
-        graph.make_all(filename,2)
+    for steps,model in itertools.product(dni_steps,models):
+        print('model: %s' % model)
+        print('dni_steps = %i' % steps)
+        for dni_scale in dni_scales:
+            # run the experiment
+            if model == 'gru':
+                seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
+                    test_gru_dni(n_in,n_hidden,n_out,steps,dni_scale,
+                                 lr,lr_decay,n_train,n_val,batch_size,patience)
+            elif model == 'gru_trace':
+                seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
+                    test_gru_trace(n_in,n_hidden,n_out,steps,dni_scale,
+                                 lr,lr_decay,n_train,n_val,batch_size,patience)
+            else:
+                print('unknown model type')
+            
+            # log the result
+            filename = model+'_copytest_DNI'+str(steps)
+            log_results(filename,0,seqlen,steps,dni_scale,n_in,n_hidden,n_out,
+                    loss,dni_err,dldp_l2,dniJ_l2,val_loss)
+            
+            # make graphs
+            graph.make_all(filename,2)
 
 
 

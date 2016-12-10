@@ -926,6 +926,279 @@ class rnn_trace(object):
                                outputs=loss)
 
 
+class gru_trace(object):
+    def __init__(self,n_in,n_hidden,n_out,steps,
+                 norm=True,p_zoneout=-1,p_dropout=-1,gradclip=10,rng=rng):
+        """
+        GRU with a DNI every 'steps' timesteps and eligibility trace updates
+        """
+        # parameters
+        self.n_in = n_in
+        self.n_hidden = n_hidden
+        self.n_out = n_out
+        self.steps = steps
+        self.norm = norm
+        self.p_zoneout = p_zoneout
+        self.p_dropout = p_dropout
+        self.gradclip = gradclip
+        
+        # initialize weights
+        def ortho_weight(ndim,rng=rng):
+            W = rng.randn(ndim, ndim)
+            u, s, v = numpy.linalg.svd(W)
+            return u.astype(theano.config.floatX)
+        def uniform_weight(n1,n2,rng=rng):
+            limit = numpy.sqrt(6./(n1+n2))
+            return rng.uniform(low=-limit,high=limit,size=(n1,n2)).astype(theano.config.floatX)
+        def const_bias(n,value=0):
+            return value*numpy.ones((n,),dtype=theano.config.floatX)
+        
+        self.Wxz = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Wxr = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Wxg = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Whz = theano.shared(ortho_weight(n_hidden),borrow=True)
+        self.Whr = theano.shared(ortho_weight(n_hidden),borrow=True)
+        self.Whg = theano.shared(ortho_weight(n_hidden),borrow=True)
+        self.Wy = theano.shared(uniform_weight(n_hidden,n_out),borrow=True)
+
+        self.bz = theano.shared(const_bias(n_hidden,0),borrow=True)
+        self.br = theano.shared(const_bias(n_hidden,1),borrow=True)
+        self.bg = theano.shared(const_bias(n_hidden,0),borrow=True)
+        self.by = theano.shared(const_bias(n_out,0),borrow=True)
+        
+        self.params = [self.Wxz,self.Wxr,self.Wxg,self.Whz,self.Whr,self.Whg,
+                       self.Wy,self.bz,self.br,self.bg,self.by]
+        
+        if self.norm:
+            # because of where layer normalization is used, no need for shifts
+            self.scale1 = theano.shared(const_bias(n_hidden,0.5),borrow=True)
+            self.scale2 = theano.shared(const_bias(n_hidden,0.5),borrow=True)
+            self.scale3 = theano.shared(const_bias(n_hidden,0.5),borrow=True)
+            self.scale4 = theano.shared(const_bias(n_hidden,0.5),borrow=True)
+            self.scale5 = theano.shared(const_bias(n_hidden,0.5),borrow=True)
+            self.scale6 = theano.shared(const_bias(n_hidden,0.5),borrow=True)
+            self.params = self.params+[self.scale1,self.scale2,self.scale3,
+                                       self.scale4,self.scale5,self.scale6]
+            
+            # if using layer norm, initial hidden state h0 needs var>0
+            # using a stable value rather than random helps w/ training
+            h0 = numpy.zeros((n_hidden,),dtype=theano.config.floatX)
+            h0[0] = 1
+            self.h0 = theano.shared(h0,borrow=True)
+        else:
+            self.h0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
+        
+        # initialize DNI
+        self.dni = dni(n_hidden,n_hidden,2)
+        
+        # not all variables get eligiblity trace updates
+        self.trace_params = [self.Wxz,self.Wxr,self.Wxg,self.Whz,self.Whr,self.Whg]
+        self.non_trace_params = [p for p in self.params if p not in self.trace_params]
+        
+    # slice for doing step calculations in parallel
+    def _slice(self,x,n):
+        return x[:,n*self.n_hidden:(n+1)*self.n_hidden]
+        
+    def train(self):
+        x = T.tensor3('x')
+        y = T.tensor3('y')
+        learning_rate = T.scalar('learning_rate')
+        trace_decay = T.scalar('trace_decay')
+        dni_scale = T.scalar('dni_scale')
+        
+        # re-initialize activation traces
+        def floatX(data):
+            return numpy.asarray(data,dtype=theano.config.floatX)
+        trace_xz = theano.shared(self.Wxz.get_value()*floatX(0.))
+        trace_xr = theano.shared(self.Wxr.get_value()*floatX(0.))
+        trace_xg = theano.shared(self.Wxg.get_value()*floatX(0.))
+        trace_hz = theano.shared(self.Whz.get_value()*floatX(0.))
+        trace_hr = theano.shared(self.Whr.get_value()*floatX(0.))
+        trace_hg = theano.shared(self.Whg.get_value()*floatX(0.))
+        
+        # small constant to avoid dividing by zero
+        eps = 1e-8
+        
+        # reshape the inputs
+        # batch x time x n -> time//steps x steps x batch x n
+        def shufflereshape(r):
+            r = r.dimshuffle([1,0,2])
+            r = r.reshape((r.shape[0]//self.steps,
+                           self.steps,
+                           r.shape[1],
+                           r.shape[2]))
+            return r
+        
+        # step takes a set of inputs over self.steps time-steps
+        def step(x_t,y_t,h_tmT,
+                 Wxz,Whz,Wxr,Whr,Wxg,Whg,Wy,bz,br,bg,by,
+                 lr,scale,Txz,Txr,Txg,Thz,Thr,Thg,decay):
+            
+            # manually build the graph for the inner loop
+            # note: nested scans are way slower unless (maybe) T is huge
+            yo_t = []
+            h_tm1 = h_tmT
+            loss = 0
+            oldTxz = Txz
+            oldTxr = Txr
+            oldTxg = Txg
+            oldThz = Thz
+            oldThr = Thr
+            oldThg = Thg
+            for t in range(self.steps):
+                if self.norm:
+                    xWxz = layer_norm(T.dot(x_t[t],Wxz),self.scale1)
+                    hWhz = layer_norm(T.dot(h_tm1,Whz),self.scale2)
+                    z = sigmoid(xWxz \
+                                +hWhz+bz)
+                    xWxr = layer_norm(T.dot(x_t[t],Wxr),self.scale3)
+                    hWhr = layer_norm(T.dot(h_tm1,Whr),self.scale4)
+                    r = sigmoid(xWxr \
+                                +hWhr+br)
+                    xWxg = layer_norm(T.dot(x_t[t],Wxg),self.scale5)
+                    hWhg = layer_norm(T.dot(r*h_tm1,Whg),self.scale6)
+                    g = tanh(xWxg \
+                            +hWhg+bg)
+                else:
+                    xWxz = T.dot(x_t[t],Wxz)
+                    hWhz = T.dot(h_tm1,Whz)
+                    z = sigmoid(xWxz+hWhz+bz)
+                    xWxr = T.dot(x_t[t],Wxr)
+                    hWhr = T.dot(h_tm1,Whr)
+                    r = sigmoid(xWxr+hWhr+br)
+                    xWxg = T.dot(x_t[t],Wxg)
+                    hWhg = T.dot(r*h_tm1,Whg)
+                    g = tanh(xWxg+hWhg+bg)
+                h_t = (1-z)*h_tm1+z*g
+                if self.p_zoneout>0:
+                    h_t = zoneout(h_t,h_tm1,self.p_zoneout)
+                h_t = theano.gradient.grad_clip(h_t,
+                                                -self.gradclip,
+                                                self.gradclip)
+                if self.p_dropout>0:
+                    output = softmax(T.dot(dropout(h_t,self.p_dropout),Wy)+by)
+                else:
+                    output = softmax(T.dot(h_t,Wy)+by)
+                yo_t.append(output)
+                h_tm1 = h_t
+                loss += T.mean(categorical_crossentropy(output,y_t[t]))
+                
+                # update traces: variance over batch dim
+                Txz = decay*Txz+T.var(xWxz,axis=0,keepdims=True)
+                Txr = decay*Txr+T.var(xWxr,axis=0,keepdims=True)
+                Txg = decay*Txg+T.var(xWxg,axis=0,keepdims=True)
+                Thz = decay*Thz+T.var(hWhz,axis=0,keepdims=True)
+                Thr = decay*Thr+T.var(hWhr,axis=0,keepdims=True)
+                Thg = decay*Thg+T.var(hWhg,axis=0,keepdims=True)
+                
+#                # update traces: mean abs over batch dim
+#                Txz = decay*Txz+T.mean(T.abs_(xWxz),axis=0,keepdims=True)
+#                Txr = decay*Txr+T.mean(T.abs_(xWxr),axis=0,keepdims=True)
+#                Txg = decay*Txg+T.mean(T.abs_(xWxg),axis=0,keepdims=True)
+#                Thz = decay*Thz+T.mean(T.abs_(hWhz),axis=0,keepdims=True)
+#                Thr = decay*Thr+T.mean(T.abs_(hWhr),axis=0,keepdims=True)
+#                Thg = decay*Thg+T.mean(T.abs_(hWhg),axis=0,keepdims=True)
+            
+            loss = loss/self.steps # to take mean
+            up_dldp_l2 = 0
+            up_dni_l2 = 0
+            # Train the GRU: backprop (loss + DNI output)
+            dni_out = self.dni.output(h_t)
+            grads = []
+            params = []
+            traces = [Txz,Txr,Txg,Thz,Thr,Thg]
+            for param,trace in zip(self.trace_params,traces):
+#                trace_scale = (trace+eps)/(T.sqrt(T.mean(T.sqr(trace)))+eps)
+                trace_scale = (trace+eps)/(T.mean(trace)+eps)
+#                trace_scale = (T.sqrt(trace)+eps)/(T.sqrt(T.mean(trace))+eps)
+                dlossdparam = T.grad(loss,param)
+                up_dldp_l2 += T.sum(T.square(dlossdparam))
+                dniJ = T.Lop(h_t,param,dni_out,disconnected_inputs='ignore')
+                up_dni_l2 += T.sum(T.square(dniJ))
+                dlossdparam = dlossdparam+scale*dniJ
+                grads.append(trace_scale*dlossdparam)
+                params.append(param)
+            for param in self.non_trace_params:
+                dlossdparam = T.grad(loss,param)
+                up_dldp_l2 += T.sum(T.square(dlossdparam))
+                dniJ = T.Lop(h_t,param,dni_out,disconnected_inputs='ignore')
+                up_dni_l2 += T.sum(T.square(dniJ))
+                dlossdparam = dlossdparam+scale*dniJ
+                grads.append(dlossdparam)
+                params.append(param)
+            
+            # Update the DNI (from the last step)
+            # recalculate the DNI prediction since it can't be passed
+            dni_out_old =self.dni.output(h_tmT)
+            # dni target: current loss backprop'ed + new dni backprop'ed
+            dni_target = T.grad(loss,h_tmT) \
+                         +scale*T.Lop(h_t,h_tmT,dni_out)
+            dni_error = T.sum(T.square(dni_out_old-dni_target))
+            for param in self.dni.params:
+                grads.append(T.grad(dni_error,param))
+                params.append(param)
+            
+            updates = adam(lr,params,grads)
+            updates.append((oldTxz,Txz))
+            updates.append((oldTxr,Txr))
+            updates.append((oldTxg,Txg))
+            updates.append((oldThz,Thz))
+            updates.append((oldThr,Thr))
+            updates.append((oldThg,Thg))
+            
+            return [h_t,loss,dni_error,T.sqrt(up_dldp_l2),T.sqrt(up_dni_l2)],updates
+        
+        [h,seq_loss,seq_dni_error,up_dldp,up_dni],updates = theano.scan(fn=step, 
+                             sequences=[shufflereshape(x),
+                                        shufflereshape(y)],
+                             outputs_info=[T.alloc(self.h0,x.shape[0],self.n_hidden),
+                                           None,None,None,None],
+                             non_sequences=[self.Wxz,self.Whz,self.Wxr,self.Whr,
+                                            self.Wxg,self.Whg,self.Wy,
+                                            self.bz,self.br,self.bg,self.by,
+                                            learning_rate,dni_scale,
+                                            trace_xz,trace_xr,trace_xg,
+                                            trace_hz,trace_hr,trace_hg,
+                                            trace_decay])
+        return theano.function(inputs=[x,y,learning_rate,dni_scale,trace_decay],
+                               outputs=[T.mean(seq_loss),
+                                        T.mean(seq_dni_error),
+                                        T.mean(up_dldp),
+                                        T.mean(up_dni)],
+                               updates=updates,
+                               name='gru_trace_train')
+    def test(self):
+        x = T.tensor3('x')
+        y = T.tensor3('y')
+        
+        def step(x_t,y_t,h_tm1,Wxz,Whz,Wxr,Whr,Wxg,Whg,Wy,bz,br,bg,by):
+            if self.norm:
+                z = sigmoid(layer_norm(T.dot(x_t,Wxz),self.scale1) \
+                            +layer_norm(T.dot(h_tm1,Whz),self.scale2)+bz)
+                r = sigmoid(layer_norm(T.dot(x_t,Wxr),self.scale3) \
+                            +layer_norm(T.dot(h_tm1,Whr),self.scale4)+br)
+                g = tanh(layer_norm(T.dot(x_t,Wxg),self.scale5) \
+                        +layer_norm(T.dot(r*h_tm1,Whg),self.scale6)+bg)
+            else:
+                z = sigmoid(T.dot(x_t,Wxz)+T.dot(h_tm1,Whz)+bz)
+                r = sigmoid(T.dot(x_t,Wxr)+T.dot(h_tm1,Whr)+br)
+                g = tanh(T.dot(x_t,Wxg)+T.dot(r*h_tm1,Whg)+bg)
+            h_t = (1-z)*h_tm1+z*g
+            yo_t = softmax(T.dot(h_t,Wy)+by)
+            loss_t = T.mean(categorical_crossentropy(yo_t,y_t))
+            return h_t,yo_t,loss_t
+        [h,yo,loss],_ = theano.scan(fn=step, 
+                             sequences=[x.dimshuffle([1,0,2]),
+                                        y.dimshuffle([1,0,2])],
+                             outputs_info=[T.alloc(self.h0,x.shape[0],self.n_hidden),
+                                           None,None],
+                             non_sequences=[self.Wxz,self.Whz,self.Wxr,self.Whr,self.Wxg,self.Whg,
+                                            self.Wy,self.bz,self.br,self.bg,self.by])
+        loss = T.mean(loss)
+        return theano.function(inputs=[x,y],
+                               outputs=loss)
+
+
 class lstm_trace(object):
     def __init__(self,n_in,n_hidden,n_out,steps,norm=True,rng=rng):
         self.n_in = n_in

@@ -502,7 +502,7 @@ class gru_dni(object):
             dni_out_old =self.dni.output(h_tmT)
             # dni target: current loss backprop'ed + new dni backprop'ed
             dni_target = T.grad(loss,h_tmT) \
-                         +scale*T.Lop(h_t,h_tmT,dni_out)
+                         +T.Lop(h_t,h_tmT,dni_out)
             dni_error = T.sum(T.square(dni_out_old-dni_target))
             for param in self.dni.params:
                 grads.append(T.grad(dni_error,param))
@@ -558,7 +558,8 @@ class gru_dni(object):
 
 
 class lstm_dni(object):
-    def __init__(self,n_in,n_hidden,n_out,steps,norm=True,rng=rng):
+    def __init__(self,n_in,n_hidden,n_out,steps,
+                 norm=True,rng=rng):
         self.n_in = n_in
         self.n_hidden = n_hidden
         self.n_out = n_out
@@ -602,14 +603,21 @@ class lstm_dni(object):
         self.L2 = numpy.sum([(w**2).sum() for w in self.W])
         
         if self.norm:
-            self.scale_c = theano.shared(numpy.ones((self.n_hidden),
-                                                    dtype=theano.config.floatX))
-            self.shift_c = theano.shared(numpy.zeros((self.n_hidden),
-                                                     dtype=theano.config.floatX))
-            self.scale_h = theano.shared(numpy.ones((self.n_hidden),
-                                                    dtype=theano.config.floatX))
-            self.shift_h = theano.shared(numpy.zeros((self.n_hidden),
-                                                     dtype=theano.config.floatX))
+            # because of bias right after, no need for shifts 1 and 2
+            self.scaleh = theano.shared(const_bias(4*n_hidden,0.5),borrow=True)
+            self.scalex = theano.shared(const_bias(4*n_hidden,0.5),borrow=True)
+            self.scalec = theano.shared(const_bias(n_hidden,1),borrow=True)
+            self.shiftc = theano.shared(const_bias(n_hidden,0),borrow=True)
+            self.params = self.params+[self.scaleh,self.scalex,
+                                       self.scalec,self.shiftc]
+            
+            # if using layer norm, initial hidden state h0 needs var>0
+            # using a stable value rather than random helps w/ training
+            h0 = numpy.zeros((n_hidden,),dtype=theano.config.floatX)
+            h0[0] = 1
+            self.h0 = theano.shared(h0,borrow=True)
+        else:
+            self.h0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
         
         # initialize DNI
         self.dni = dni(n_hidden,2*n_hidden,2)
@@ -645,17 +653,19 @@ class lstm_dni(object):
             h_tm1 = h_tmT
             loss = 0
             for t in range(self.steps):
-                preact = T.dot(x_t[t],Wx)+T.dot(h_tm1,Wh)+b
+                if self.norm:
+                    preact = layer_norm(T.dot(x_t[t],Wx),self.scalex) \
+                             +layer_norm(T.dot(h_tm1,Wh),self.scaleh)+b
+                else:
+                    preact = T.dot(x_t[t],Wx)+T.dot(h_tm1,Wh)+b
                 i = sigmoid(self._slice(preact,0))
                 f = sigmoid(self._slice(preact,1))
                 o = sigmoid(self._slice(preact,2))
                 g = tanh(self._slice(preact,3))
                 c_t = c_tm1*f+g*i
                 if self.norm:
-                    c_t = layer_norm(c_t,self.scale_c,self.shift_c)
+                    c_t = layer_norm(c_t,self.scalec,self.shiftc)
                 h_t = o*tanh(c_t)
-                if self.norm:
-                    h_t = layer_norm(h_t,self.scale_h,self.shift_h)
                 output = softmax(T.dot(h_t,Wy)+by)
                 yo_t.append(output)
                 # update for next step
@@ -679,9 +689,6 @@ class lstm_dni(object):
                 params.append(param)
             # output-gate weights get dni_h
             dni_h_params = [self.Wxo,self.Who,self.bo]
-            if self.norm:
-                dni_h_params.append(self.scale_h)
-                dni_h_params.append(self.shift_h)
             for param in dni_h_params:
                 dlossdparam = T.grad(loss,param)
                 dniJ = T.Lop(h_t,param,dni_out_h)
@@ -694,8 +701,8 @@ class lstm_dni(object):
                             self.Whi,self.Whf,self.Whg,
                             self.bi,self.bf,self.bg]
             if self.norm:
-                dni_h_params.append(self.scale_c)
-                dni_h_params.append(self.shift_c)
+                dni_c_params = dni_c_params + [self.scalex,self.scaleh,
+                                               self.scalec,self.shiftc]
             for param in dni_c_params:
                 dlossparam = T.grad(loss,param)
                 dniJ = T.Lop(c_t,param,dni_out_c)
@@ -725,14 +732,13 @@ class lstm_dni(object):
                     T.sqrt(up_dldp_l2),T.sqrt(up_dni_l2)],updates
         
         c0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
-        h0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
         [c,h,
          seq_loss,seq_dni_error,
          up_dldp,up_dni],updates = theano.scan(fn=step,
                                 sequences=[shufflereshape(x),
                                            shufflereshape(y)],
                                 outputs_info=[T.alloc(c0,x.shape[0],self.n_hidden),
-                                              T.alloc(h0,x.shape[0],self.n_hidden),
+                                              T.alloc(self.h0,x.shape[0],self.n_hidden),
                                               None,None,None,None],
                                 non_sequences=[self.Wx,self.Wh,self.Wy,
                                                self.b,self.by,
@@ -750,24 +756,25 @@ class lstm_dni(object):
         
         def step(x_t,y_t,c_tm1,h_tm1,
                  Wx,Wh,Wy,b,by):
-            preact = T.dot(x_t,Wx)+T.dot(h_tm1,Wh)+b
+            if self.norm:
+                preact = layer_norm(T.dot(x_t,Wx),self.scalex) \
+                         +layer_norm(T.dot(h_tm1,Wh),self.scaleh)+b
+            else:
+                preact = T.dot(x_t,Wx)+T.dot(h_tm1,Wh)+b
             i = sigmoid(self._slice(preact,0))
             f = sigmoid(self._slice(preact,1))
             o = sigmoid(self._slice(preact,2))
             g = tanh(self._slice(preact,3))
             c_t = c_tm1*f+g*i
             if self.norm:
-                    c_t = layer_norm(c_t,self.scale_c,self.shift_c)
+                    c_t = layer_norm(c_t,self.scalec,self.shiftc)
             h_t = o*tanh(c_t)
-            if self.norm:
-                    h_t = layer_norm(h_t,self.scale_h,self.shift_h)
             yo_t = softmax(T.dot(h_t,Wy)+by)
             loss_t = T.mean(categorical_crossentropy(yo_t,y_t))
             return c_t,h_t,yo_t,loss_t
         c0 = T.alloc(T.zeros((self.n_hidden,),dtype=theano.config.floatX),
                      x.shape[0],self.n_hidden)
-        h0 = T.alloc(T.zeros((self.n_hidden,),dtype=theano.config.floatX),
-                     x.shape[0],self.n_hidden)
+        h0 = T.alloc(self.h0,x.shape[0],self.n_hidden)
         [c,s,yo,loss],_ = theano.scan(fn=step,
                               sequences=[x.dimshuffle([1,0,2]),
                                          y.dimshuffle([1,0,2])],
@@ -1083,13 +1090,29 @@ class gru_trace(object):
                 h_tm1 = h_t
                 loss += T.mean(categorical_crossentropy(output,y_t[t]))
                 
-                # update traces: variance over batch dim
-                Txz = decay*Txz+T.var(xWxz,axis=0,keepdims=True)
-                Txr = decay*Txr+T.var(xWxr,axis=0,keepdims=True)
-                Txg = decay*Txg+T.var(xWxg,axis=0,keepdims=True)
-                Thz = decay*Thz+T.var(hWhz,axis=0,keepdims=True)
-                Thr = decay*Thr+T.var(hWhr,axis=0,keepdims=True)
-                Thg = decay*Thg+T.var(hWhg,axis=0,keepdims=True)
+#                # update traces: variance over batch dim
+#                Txz = decay*Txz+T.var(xWxz,axis=0,keepdims=True)
+#                Txr = decay*Txr+T.var(xWxr,axis=0,keepdims=True)
+#                Txg = decay*Txg+T.var(xWxg,axis=0,keepdims=True)
+#                Thz = decay*Thz+T.var(hWhz,axis=0,keepdims=True)
+#                Thr = decay*Thr+T.var(hWhr,axis=0,keepdims=True)
+#                Thg = decay*Thg+T.var(hWhg,axis=0,keepdims=True)
+                
+#                # update traces: variance over batch divided by total variance
+#                Txz = decay*Txz+T.var(xWxz,axis=0,keepdims=True)/T.var(xWxz)
+#                Txr = decay*Txr+T.var(xWxr,axis=0,keepdims=True)/T.var(xWxr)
+#                Txg = decay*Txg+T.var(xWxg,axis=0,keepdims=True)/T.var(xWxg)
+#                Thz = decay*Thz+T.var(hWhz,axis=0,keepdims=True)/T.var(hWhz)
+#                Thr = decay*Thr+T.var(hWhr,axis=0,keepdims=True)/T.var(hWhr)
+#                Thg = decay*Thg+T.var(hWhg,axis=0,keepdims=True)/T.var(hWhg)
+                
+                # update traces: mean abs over batch divided by total mean
+                Txz = decay*Txz+T.mean(T.abs_(xWxz),axis=0,keepdims=True)/T.mean(T.abs_(xWxz))
+                Txr = decay*Txr+T.mean(T.abs_(xWxr),axis=0,keepdims=True)/T.mean(T.abs_(xWxr))
+                Txg = decay*Txg+T.mean(T.abs_(xWxg),axis=0,keepdims=True)/T.mean(T.abs_(xWxg))
+                Thz = decay*Thz+T.mean(T.abs_(hWhz),axis=0,keepdims=True)/T.mean(T.abs_(hWhz))
+                Thr = decay*Thr+T.mean(T.abs_(hWhr),axis=0,keepdims=True)/T.mean(T.abs_(hWhr))
+                Thg = decay*Thg+T.mean(T.abs_(hWhg),axis=0,keepdims=True)/T.mean(T.abs_(hWhg))
                 
 #                # update traces: mean abs over batch dim
 #                Txz = decay*Txz+T.mean(T.abs_(xWxz),axis=0,keepdims=True)
@@ -1110,6 +1133,7 @@ class gru_trace(object):
             for param,trace in zip(self.trace_params,traces):
 #                trace_scale = (trace+eps)/(T.sqrt(T.mean(T.sqr(trace)))+eps)
                 trace_scale = (trace+eps)/(T.mean(trace)+eps)
+#                trace_scale = (T.mean(trace)+eps)/(trace+eps)
 #                trace_scale = (T.sqrt(trace)+eps)/(T.sqrt(T.mean(trace))+eps)
                 dlossdparam = T.grad(loss,param)
                 up_dldp_l2 += T.sum(T.square(dlossdparam))
@@ -1200,7 +1224,8 @@ class gru_trace(object):
 
 
 class lstm_trace(object):
-    def __init__(self,n_in,n_hidden,n_out,steps,norm=True,rng=rng):
+    def __init__(self,n_in,n_hidden,n_out,steps,
+                 norm=True,rng=rng):
         self.n_in = n_in
         self.n_hidden = n_hidden
         self.n_out = n_out
@@ -1217,30 +1242,51 @@ class lstm_trace(object):
             return rng.uniform(low=-limit,high=limit,size=(n1,n2)).astype(theano.config.floatX)
         def const_bias(n,value=0):
             return value*numpy.ones((n,),dtype=theano.config.floatX)
-        self.Wx = theano.shared(numpy.concatenate(
-                    [uniform_weight(n_in,n_hidden) for i in range(4)],axis=1),
-                     borrow=True)
-        self.Wh = theano.shared(numpy.concatenate(
-                    [ortho_weight(n_hidden,rng) for i in range(4)],axis=1),
-                     borrow=True)
-        self.Wy = theano.shared(uniform_weight(n_hidden,n_out))
-        self.bx = theano.shared(numpy.concatenate(
-                    [const_bias(n_hidden,0) for i in range(4)],axis=0),
-                     borrow=True)
-        self.by = theano.shared(const_bias(n_out,0))
+        self.Wxi = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Wxf = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Wxo = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Wxg = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Wx = T.concatenate([self.Wxi,self.Wxf,self.Wxo,self.Wxg],
+                                axis=1)
+        self.Whi = theano.shared(ortho_weight(n_hidden,rng),borrow=True)
+        self.Whf = theano.shared(ortho_weight(n_hidden,rng),borrow=True)
+        self.Who = theano.shared(ortho_weight(n_hidden,rng),borrow=True)
+        self.Whg = theano.shared(ortho_weight(n_hidden,rng),borrow=True)
+        self.Wh = T.concatenate([self.Whi,self.Whf,self.Who,self.Whg],
+                                axis=1)
+        self.Wy = theano.shared(uniform_weight(n_hidden,n_out),borrow=True)
         
-        self.params = [self.Wx,self.Wh,self.Wy,self.bx,self.by]
+        self.bi = theano.shared(const_bias(n_hidden,-1),borrow=True)
+        self.bf = theano.shared(const_bias(n_hidden,1),borrow=True)
+        self.bo = theano.shared(const_bias(n_hidden,1),borrow=True)
+        self.bg = theano.shared(const_bias(n_hidden,0),borrow=True)
+        self.b = T.concatenate([self.bi,self.bf,self.bo,self.bg],axis=0)
+        self.by = theano.shared(const_bias(n_out,0),borrow=True)
+        
+        self.params = [self.Wx,self.Wh,self.Wy,self.b,self.by]
         self.W = [self.Wx,self.Wh,self.Wy]
-        self.b = [self.bx,self.by]
-        
-        self.trace_params = [self.Wh]
-        self.non_trace_params = [self.Wx,self.Wy,self.bx,self.by]
-        
         self.L1 = numpy.sum([abs(w).sum() for w in self.W])
         self.L2 = numpy.sum([(w**2).sum() for w in self.W])
         
+        if self.norm:
+            # because of bias right after, no need for shifts 1 and 2
+            self.scaleh = theano.shared(const_bias(4*n_hidden,0.5),borrow=True)
+            self.scalex = theano.shared(const_bias(4*n_hidden,0.5),borrow=True)
+            self.scalec = theano.shared(const_bias(n_hidden,1),borrow=True)
+            self.shiftc = theano.shared(const_bias(n_hidden,0),borrow=True)
+            self.params = self.params+[self.scaleh,self.scalex,
+                                       self.scalec,self.shiftc]
+            
+            # if using layer norm, initial hidden state h0 needs var>0
+            # using a stable value rather than random helps w/ training
+            h0 = numpy.zeros((n_hidden,),dtype=theano.config.floatX)
+            h0[0] = 1
+            self.h0 = theano.shared(h0,borrow=True)
+        else:
+            self.h0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
+        
         # initialize DNI
-        self.dni = dni(n_hidden,n_hidden,2)
+        self.dni = dni(n_hidden,2*n_hidden,2)
     
     # slice for doing step calculations in parallel
     def _slice(self,x,n):
@@ -1250,16 +1296,7 @@ class lstm_trace(object):
         x = T.tensor3('x')
         y = T.tensor3('y')
         learning_rate = T.scalar('learning_rate')
-        trace_decay = T.scalar('trace_decay')
         dni_scale = T.scalar('dni_scale')
-        
-        # re-initialize activation trace
-        def floatX(data):
-            return numpy.asarray(data,dtype=theano.config.floatX)
-        self.trace = theano.shared(self.Wh.get_value()*floatX(0.))
-        
-        # small constant to avoid dividing by zero
-        eps = 1e-8
         
         # reshape the inputs
         # batch x time x n -> time//steps x steps x batch x n
@@ -1273,94 +1310,106 @@ class lstm_trace(object):
         
         # step takes a set of inputs over self.steps time-steps
         def step(x_t,y_t,c_tmT,h_tmT,
-                 Wx,Wh,Wy,bx,by,
-                 lr,scale,trace,decay):
+                 Wx,Wh,Wy,b,by,
+                 lr,scale):
             
             # manually build the graph for the inner loop
             yo_t = []
             c_tm1 = c_tmT
             h_tm1 = h_tmT
-            old_trace = trace
             loss = 0
             for t in range(self.steps):
-                preact_x = T.dot(x_t[t],Wx)
-                preact_h = T.dot(h_tm1,Wh)
-                preact = preact_x+preact_h+bx
+                if self.norm:
+                    preact = layer_norm(T.dot(x_t[t],Wx),self.scalex) \
+                             +layer_norm(T.dot(h_tm1,Wh),self.scaleh)+b
+                else:
+                    preact = T.dot(x_t[t],Wx)+T.dot(h_tm1,Wh)+b
                 i = sigmoid(self._slice(preact,0))
                 f = sigmoid(self._slice(preact,1))
                 o = sigmoid(self._slice(preact,2))
                 g = tanh(self._slice(preact,3))
                 c_t = c_tm1*f+g*i
-                h_t = tanh(c_t)*o
                 if self.norm:
-                    h_t = layer_norm(h_t)
-                preact_y = T.dot(h_t,Wy)
-                output = softmax(preact_y+by)
+                    c_t = layer_norm(c_t,self.scalec,self.shiftc)
+                h_t = o*tanh(c_t)
+                output = softmax(T.dot(h_t,Wy)+by)
                 yo_t.append(output)
                 # update for next step
                 c_tm1 = c_t
                 h_tm1 = h_t
                 loss += T.mean(categorical_crossentropy(output,y_t[t]))
-                
-                # update traces: RMS taken over the batch dimension
-                trace = decay*trace \
-                         +T.sqrt(T.mean(T.sqr(preact_h),axis=0,keepdims=True))
             
             loss = loss/self.steps # to take mean
             up_dldp_l2 = 0
             up_dni_l2 = 0
             # Train the LSTM: backprop (loss + DNI output)
             dni_out = self.dni.output(h_t)
+            dni_out_h = self._slice(dni_out,0)
+            dni_out_c = self._slice(dni_out,1)
             grads = []
-            # recurrent weights incorporate traces
-            for param in self.trace_params:
-                trace_scale = (trace+eps)/ \
-                                (T.sqrt(T.mean(T.sqr(trace)))+eps)
+            params = [] # params to Adam need to be in same order as grads 
+            # output weights don't have dni feedback
+            for param in [self.Wy,self.by]:
                 dlossdparam = T.grad(loss,param)
-                dniJ = T.Lop(h_t,param,dni_out,disconnected_inputs='ignore')
-                up_dldp_l2 += T.sum(T.square(dlossdparam))
-                up_dni_l2 += T.sum(T.square(dniJ))
-                grads.append(trace_scale*(dlossdparam+scale*dniJ))
-            # non-trace parameters get regular DNI updates
-            for param in self.non_trace_params:
+                grads.append(dlossdparam)
+                params.append(param)
+            # output-gate weights get dni_h
+            dni_h_params = [self.Wxo,self.Who,self.bo]
+            for param in dni_h_params:
                 dlossdparam = T.grad(loss,param)
-                dniJ = T.Lop(h_t,param,dni_out,disconnected_inputs='ignore')
-                up_dldp_l2 += T.sum(T.square(dlossdparam))
-                up_dni_l2 += T.sum(T.square(dniJ))
+                dniJ = T.Lop(h_t,param,dni_out_h)
                 grads.append(dlossdparam+scale*dniJ)
+                params.append(param)
+                up_dldp_l2 += T.sum(T.square(dlossdparam))
+                up_dni_l2 += T.sum(T.square(dniJ))
+            # all other gates get dni_c
+            dni_c_params = [self.Wxi,self.Wxf,self.Wxg,
+                            self.Whi,self.Whf,self.Whg,
+                            self.bi,self.bf,self.bg]
+            if self.norm:
+                dni_c_params = dni_c_params + [self.scalex,self.scaleh,
+                                               self.scalec,self.shiftc]
+            for param in dni_c_params:
+                dlossparam = T.grad(loss,param)
+                dniJ = T.Lop(c_t,param,dni_out_c)
+                grads.append(dlossparam+scale*dniJ)
+                params.append(param)
+                up_dldp_l2 += T.sum(T.square(dlossdparam))
+                up_dni_l2 += T.sum(T.square(dniJ))
             
             # Update the DNI (from the last step)
             # recalculate the DNI prediction since it can't be passed
-            dni_out_old =self.dni.output(h_tmT)
+            dni_out_old = self.dni.output(h_tmT)
+            dni_old_h = self._slice(dni_out_old,0)
+            dni_old_c = self._slice(dni_out_old,1)
             # dni target: current loss backprop'ed + new dni backprop'ed
-            dni_target = T.grad(loss,h_tmT) \
-                         +T.Lop(h_t,h_tmT,dni_out)
-            dni_error = T.sum(T.square(dni_out_old-dni_target))
+            dni_target_h = T.grad(loss,h_tmT) \
+                           +T.Lop(h_t,h_tmT,dni_out_h)
+            dni_target_c = T.grad(loss,c_tmT) \
+                           +T.Lop(c_t,c_tmT,dni_out_c)
+            dni_error = T.sum(T.square(dni_old_h-dni_target_h)) \
+                        +T.sum(T.square(dni_old_c-dni_target_c))
             for param in self.dni.params:
                 grads.append(T.grad(dni_error,param))
             
-            # params need to be passed to adam in same order as their grads
-            updates = adam(lr,self.trace_params+self.non_trace_params+self.dni.params,grads)
-            updates.append((old_trace,trace))
+            updates = adam(lr,params+self.dni.params,grads)
             
             return [c_t,h_t,loss,dni_error,
                     T.sqrt(up_dldp_l2),T.sqrt(up_dni_l2)],updates
         
         c0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
-        h0 = T.zeros((self.n_hidden,),dtype=theano.config.floatX)
         [c,h,
          seq_loss,seq_dni_error,
          up_dldp,up_dni],updates = theano.scan(fn=step,
                                 sequences=[shufflereshape(x),
                                            shufflereshape(y)],
                                 outputs_info=[T.alloc(c0,x.shape[0],self.n_hidden),
-                                              T.alloc(h0,x.shape[0],self.n_hidden),
+                                              T.alloc(self.h0,x.shape[0],self.n_hidden),
                                               None,None,None,None],
                                 non_sequences=[self.Wx,self.Wh,self.Wy,
-                                               self.bx,self.by,
-                                               learning_rate,dni_scale,
-                                               self.trace,trace_decay])
-        return theano.function(inputs=[x,y,learning_rate,dni_scale,trace_decay],
+                                               self.b,self.by,
+                                               learning_rate,dni_scale])
+        return theano.function(inputs=[x,y,learning_rate,dni_scale],
                                outputs=[T.mean(seq_loss),
                                         T.mean(seq_dni_error),
                                         T.mean(up_dldp),
@@ -1372,29 +1421,32 @@ class lstm_trace(object):
         y = T.tensor3('y')
         
         def step(x_t,y_t,c_tm1,h_tm1,
-                 Wx,Wh,Wy,bx,by):
-            preact = T.dot(x_t,Wx)+T.dot(h_tm1,Wh)+bx
+                 Wx,Wh,Wy,b,by):
+            if self.norm:
+                preact = layer_norm(T.dot(x_t,Wx),self.scalex) \
+                         +layer_norm(T.dot(h_tm1,Wh),self.scaleh)+b
+            else:
+                preact = T.dot(x_t,Wx)+T.dot(h_tm1,Wh)+b
             i = sigmoid(self._slice(preact,0))
             f = sigmoid(self._slice(preact,1))
             o = sigmoid(self._slice(preact,2))
             g = tanh(self._slice(preact,3))
             c_t = c_tm1*f+g*i
-            h_t = tanh(c_t)*o
             if self.norm:
-                    h_t = layer_norm(h_t)
+                    c_t = layer_norm(c_t,self.scalec,self.shiftc)
+            h_t = o*tanh(c_t)
             yo_t = softmax(T.dot(h_t,Wy)+by)
             loss_t = T.mean(categorical_crossentropy(yo_t,y_t))
             return c_t,h_t,yo_t,loss_t
         c0 = T.alloc(T.zeros((self.n_hidden,),dtype=theano.config.floatX),
                      x.shape[0],self.n_hidden)
-        h0 = T.alloc(T.zeros((self.n_hidden,),dtype=theano.config.floatX),
-                     x.shape[0],self.n_hidden)
-        [c,h,yo,loss],_ = theano.scan(fn=step,
+        h0 = T.alloc(self.h0,x.shape[0],self.n_hidden)
+        [c,s,yo,loss],_ = theano.scan(fn=step,
                               sequences=[x.dimshuffle([1,0,2]),
                                          y.dimshuffle([1,0,2])],
                               outputs_info=[c0,h0,None,None],
                               non_sequences=[self.Wx,self.Wh,self.Wy,
-                                             self.bx,self.by])
+                                             self.b,self.by])
         loss = T.mean(loss)
         return theano.function(inputs=[x,y],
                                outputs=loss)

@@ -166,20 +166,10 @@ def log_results(filename,line,sequence_length,steps,dni_scale,n_in,n_hidden,n_ou
         writer.writerow((sequence_length,steps,dni_scale,n_in,n_hidden,n_out,
                          loss,dni_err,dldp_l2,dniJ_l2,val_loss))
 
-def test_gru_dni(n_in,n_hidden,n_out,dni_steps,dni_scale,
-                 lr,lr_decay,n_train,n_val,batch_size,patience):
-    model = recurrent.gru_dni(n_in,n_hidden,n_out,dni_steps)
+def test_lstm_dni(n_in,n_hidden,n_out,dni_steps,dni_scale,
+                  lr,lr_decay,n_train,n_val,batch_size,patience):
+    model = recurrent.lstm_dni(n_in,n_hidden,n_out,dni_steps)
     train = model.train()
-    test = model.test()
-    return experiment(train,lr,lr_decay,dni_scale,batch_size,
-                      test,n_train,n_val,patience)
-
-def test_gru_trace(n_in,n_hidden,n_out,dni_steps,dni_scale,
-                   lr,lr_decay,n_train,n_val,batch_size,patience):
-    model = recurrent.gru_trace(n_in,n_hidden,n_out,dni_steps)
-    tr_decay = 0.95
-    model_train = model.train()
-    train = lambda x,y,l,d: model_train(x,y,l,d,tr_decay)
     test = model.test()
     return experiment(train,lr,lr_decay,dni_scale,batch_size,
                       test,n_train,n_val,patience)
@@ -194,7 +184,7 @@ if __name__ == "__main__":
     parser.add_argument('--learnrate',nargs='*',type=float,
                         default=[7e-5])
     parser.add_argument('--models',nargs='*',type=str,
-                        default=['gru_trace'])
+                        default=['lstm'])
     dni_steps = parser.parse_args().dni_steps
     lr = parser.parse_args().learnrate[0]
     models = parser.parse_args().models
@@ -217,13 +207,9 @@ if __name__ == "__main__":
         print('dni_steps = %i' % steps)
         for dni_scale in dni_scales:
             # run the experiment
-            if model == 'gru':
+            if model == 'lstm':
                 seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
-                    test_gru_dni(n_in,n_hidden,n_out,steps,dni_scale,
-                                 lr,lr_decay,n_train,n_val,batch_size,patience)
-            elif model == 'gru_trace':
-                seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
-                    test_gru_trace(n_in,n_hidden,n_out,steps,dni_scale,
+                    test_lstm_dni(n_in,n_hidden,n_out,steps,dni_scale,
                                  lr,lr_decay,n_train,n_val,batch_size,patience)
             else:
                 print('unknown model type')

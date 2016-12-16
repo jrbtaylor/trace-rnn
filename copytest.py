@@ -174,6 +174,14 @@ def test_lstm_dni(n_in,n_hidden,n_out,dni_steps,dni_scale,
     return experiment(train,lr,lr_decay,dni_scale,batch_size,
                       test,n_train,n_val,patience)
 
+def test_lstm_adamtrace(n_in,n_hidden,n_out,dni_steps,dni_scale,
+                  lr,lr_decay,n_train,n_val,batch_size,patience):
+    model = recurrent.lstm_adamtrace(n_in,n_hidden,n_out,dni_steps)
+    train = model.train()
+    test = model.test()
+    return experiment(train,lr,lr_decay,dni_scale,batch_size,
+                      test,n_train,n_val,patience)
+
 if __name__ == "__main__":
     import graph
     import itertools
@@ -210,6 +218,10 @@ if __name__ == "__main__":
             if model == 'lstm':
                 seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
                     test_lstm_dni(n_in,n_hidden,n_out,steps,dni_scale,
+                                 lr,lr_decay,n_train,n_val,batch_size,patience)
+            elif model == 'lstm_adamtrace':
+                seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
+                    test_lstm_adamtrace(n_in,n_hidden,n_out,steps,dni_scale,
                                  lr,lr_decay,n_train,n_val,batch_size,patience)
             else:
                 print('unknown model type')

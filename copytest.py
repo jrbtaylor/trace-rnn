@@ -168,7 +168,8 @@ def log_results(filename,line,sequence_length,steps,dni_scale,n_in,n_hidden,n_ou
 
 def test_lstm_dni(n_in,n_hidden,n_out,dni_steps,dni_scale,
                   lr,lr_decay,n_train,n_val,batch_size,patience):
-    model = recurrent.lstm_dni(n_in,n_hidden,n_out,dni_steps)
+    model = recurrent.lstm_dni(n_in,n_hidden,n_out,dni_steps,
+                               l1_act=1e-6)
     train = model.train()
     test = model.test()
     return experiment(train,lr,lr_decay,dni_scale,batch_size,

@@ -559,12 +559,13 @@ class gru_dni(object):
 
 class lstm_dni(object):
     def __init__(self,n_in,n_hidden,n_out,steps,
-                 norm=True,rng=rng):
+                 norm=True,l1_act=0,rng=rng):
         self.n_in = n_in
         self.n_hidden = n_hidden
         self.n_out = n_out
         self.steps = steps
         self.norm = norm
+        self.l1_act = l1_act
         
         # initialize weights
         def ortho_weight(ndim,rng=rng):
@@ -672,6 +673,12 @@ class lstm_dni(object):
                 c_tm1 = c_t
                 h_tm1 = h_t
                 loss += T.mean(categorical_crossentropy(output,y_t[t]))
+                if self.l1_act>0:
+                    # L1 activation norm = 1 implies only 1 unit is active
+                    # when layer norm is used, so instead allow a higher L1norm
+                    # say, some fraction of n_hidden
+                    loss += self.l1_act*T.mean(T.abs_(T.sum(T.abs_(c_t),axis=1) \
+                                                      -T.sqrt(0.5*self.n_hidden)))
             
             loss = loss/self.steps # to take mean
             up_dldp_l2 = 0
@@ -1306,8 +1313,8 @@ class lstm_adamtrace(object):
         self.dni = dni(n_hidden,2*n_hidden,2)
     
     # slice for doing step calculations in parallel
-    def _slice(self,x,n,step):
-        return x[:,n*step:(n+1)*step]
+    def _slice(self,x,n):
+        return x[:,n*self.n_hidden:(n+1)*self.n_hidden]
         
     def train(self):
         x = T.tensor3('x')
@@ -1316,13 +1323,11 @@ class lstm_adamtrace(object):
         dni_scale = T.scalar('dni_scale')
         
         # re-initialize the activation traces
-        def floatX(data):
-            return numpy.asarray(data,dtype=theano.config.floatX)
-        mean_x = theano.shared(self.Wx.get_value()*floatX(0.))
-        var_x = theano.shared(self.Wx.get_value()*floatX(0.))
-        mean_h = theano.shared(self.Wh.get_value()*floatX(0.))
-        var_h = theano.shared(self.Wh.get_value()*floatX(0.))
-        time = theano.shared(floatX(0.))
+        mean_x = theano.shared(numpy.zeros((4*self.n_hidden),dtype=theano.config.floatX))
+        var_x = theano.shared(numpy.zeros((4*self.n_hidden),dtype=theano.config.floatX))
+        mean_h = theano.shared(numpy.zeros((4*self.n_hidden),dtype=theano.config.floatX))
+        var_h = theano.shared(numpy.zeros((4*self.n_hidden),dtype=theano.config.floatX))
+        time = theano.shared(numpy.zeros((1),dtype=theano.config.floatX))
         
         # default values for adam
         b1 = 0.9

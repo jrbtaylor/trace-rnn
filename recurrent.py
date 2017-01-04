@@ -1305,9 +1305,9 @@ class lstm_trace(object):
             incr = T.mean(T.abs_(act),axis=0,keepdims=True)
         elif self.trace_incr=='l2':
             incr = T.var(act,axis=0,keepdims=True)
-        elif self.trace_incr=='l1_stepnorm':
+        elif self.trace_incr=='l1_step':
             incr = T.mean(T.abs_(act),axis=0,keepdims=True)/T.mean(T.abs_(act))
-        elif self.trace_incr=='l2_stepnorm':
+        elif self.trace_incr=='l2_step':
             incr = T.var(act,axis=0,keepdims=True)/T.var(act)
         return incr
     

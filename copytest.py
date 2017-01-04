@@ -146,25 +146,52 @@ def experiment(train_fcn,lr,lr_decay,dni_scale,batch_size,
     
     return seqlens, loss, dni_err, dldp_l2, dniJ_l2, val_loss
 
-def log_results(filename,line,sequence_length,steps,dni_scale,n_in,n_hidden,n_out,
-                loss,dni_err,dldp_l2,dniJ_l2,val_loss,overwrite=False):
-        import csv
-        import os
-        if not filename[-4:]=='.csv':
-            filename = filename+'.csv'
-        if line==0 and overwrite:
-            # check if old log exists and delete
-            if os.path.isfile(filename):
-                os.remove(filename)
-        file = open(filename,'a')
-        writer = csv.writer(file)
-        if line==0:
-            writer.writerow(('sequence_length','DNI_steps','DNI_scale',
-                             'n_in','n_hidden','n_out',
-                             'Training_loss','DNI_err',
-                             '|dldp|','|dniJ|','Validation_loss'))
-        writer.writerow((sequence_length,steps,dni_scale,n_in,n_hidden,n_out,
-                         loss,dni_err,dldp_l2,dniJ_l2,val_loss))
+#def log_results(filename,line,sequence_length,steps,dni_scale,n_in,n_hidden,n_out,
+#                loss,dni_err,dldp_l2,dniJ_l2,val_loss,overwrite=False):
+#        import csv
+#        import os
+#        if not filename[-4:]=='.csv':
+#            filename = filename+'.csv'
+#        if line==0 and overwrite:
+#            # check if old log exists and delete
+#            if os.path.isfile(filename):
+#                os.remove(filename)
+#        file = open(filename,'a')
+#        writer = csv.writer(file)
+#        if line==0:
+#            writer.writerow(('sequence_length','DNI_steps','DNI_scale',
+#                             'n_in','n_hidden','n_out',
+#                             'Training_loss','DNI_err',
+#                             '|dldp|','|dniJ|','Validation_loss'))
+#        writer.writerow((sequence_length,steps,dni_scale,n_in,n_hidden,n_out,
+#                         loss,dni_err,dldp_l2,dniJ_l2,val_loss))
+
+def log_results(filename,header,results):
+    import csv
+    import os
+    if not filename[-4:]=='.csv':
+        filename = filename+'.csv'
+    
+    writeheader = False
+    
+    # check that the header of the file matches the input
+    if os.path.isfile(filename):
+        file = open(filename,'r')
+        reader = csv.reader(file,delimiter=',')
+        fileheader = reader.next()
+        file.close()
+        if fileheader!=header:
+            os.remove(filename)
+            writeheader = True
+    else:
+        writeheader = True
+    
+    file = open(filename,'a')
+    writer = csv.writer(file)
+    if writeheader:
+        writer.writerow(header)
+    writer.writerow(results)
+    file.close()
 
 def test_lstm_dni(n_in,n_hidden,n_out,dni_steps,dni_scale,
                   lr,lr_decay,n_train,n_val,batch_size,patience):
@@ -211,44 +238,59 @@ if __name__ == "__main__":
     patience = 500
     batch_size = 256 # from paper
     n_hidden = 256 # from paper
-    dni_scales = [0,0.1,1]
     
     for steps,model in itertools.product(dni_steps,models):
         print('model: %s' % model)
         print('dni_steps = %i' % steps)
-        for dni_scale in dni_scales:
-            # run the experiment
-            if model == 'lstm':
+        
+        if model == 'lstm':
+            # this experiment is just to show that the dni helps
+            # and that the scale needs to be 0.1 instead of 1
+            dni_scales = [0,0.1,1]
+            for dni_scale in dni_scales:
                 seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
                     test_lstm_dni(n_in,n_hidden,n_out,steps,dni_scale,
                                  lr,lr_decay,n_train,n_val,batch_size,patience)
                 # log the result
                 filename = model+'_copytest_DNI'+str(steps)
-                log_results(filename,0,seqlen,steps,dni_scale,n_in,n_hidden,
-                            n_out,loss,dni_err,dldp_l2,dniJ_l2,val_loss)
+                header = ['sequence_length','DNI_steps','DNI_scale',
+                         'n_in','n_hidden','n_out',
+                         'Training_loss','DNI_err',
+                         '|dldp|','|dniJ|','Validation_loss']
+                results = [seqlen,steps,dni_scale,n_in,n_hidden,n_out,
+                           loss,dni_err,dldp_l2,dniJ_l2,val_loss]
+                log_results(filename,header,results)
                 # make graphs
-                graph.make_all(filename,2)
-            elif model == 'lstm_trace':
-                trace_incrs = ['l1','l2','l1_stepnorm','l2_stepnorm',
-                               'l1','l2','l1_stepnorm','l2_stepnorm']
-                trace_norms = ['l1','l2','l1_inv','l2_inv',
-                               'l1_inv','l2_inv','l1','l2']
-                for trace_incr,trace_norm in zip(trace_incrs,trace_norms):
-                    for trace_decay in [0.5,0.9,0.99]:
-                        seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
-                            test_lstm_trace(n_in,n_hidden,n_out,steps,dni_scale,
-                                         lr,lr_decay,n_train,n_val,batch_size,patience,
-                                         trace_incr,trace_norm,trace_decay)
-                        # log the result
-                        filename = model+'_copytest_DNI'+str(steps) \
-                                   +'_incr'+trace_incr+'_norm'+trace_norm \
-                                   +'_decay'+str(trace_decay).replace('.','p')
-                        log_results(filename,0,seqlen,steps,dni_scale,n_in,n_hidden,
-                                    n_out,loss,dni_err,dldp_l2,dniJ_l2,val_loss)
-                        # make graphs
-                        graph.make_all(filename,2)
-            else:
-                print('unknown model type')
+                graph.make_all(filename,'DNI_scale')
+        
+        elif model == 'lstm_trace':
+            # this experiment is to find how we want to increment and normalize
+            # the activation traces, assuming the dni already works and helps
+            dni_scale = 0.1
+            trace_incrs = ['l1','l2','l1_step','l2_step',
+                           'l1','l2','l1_step','l2_step']
+            trace_norms = ['l1','l2','l1_inv','l2_inv',
+                           'l1_inv','l2_inv','l1','l2']
+            for trace_incr,trace_norm in zip(trace_incrs,trace_norms):
+                for trace_decay in [0.5,0.9,0.99]:
+                    seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
+                        test_lstm_trace(n_in,n_hidden,n_out,steps,dni_scale,
+                                     lr,lr_decay,n_train,n_val,batch_size,patience,
+                                     trace_incr,trace_norm,trace_decay)
+                    # log the result
+                    filename = model+'_copytest_DNI'+str(steps) \
+                               +'_'+trace_incr+'incr_'+trace_norm+'norm'
+                    header = ['sequence_length','DNI_steps','DNI_scale',
+                             'n_in','n_hidden','n_out',
+                             'Training_loss','DNI_err',
+                             '|dldp|','|dniJ|','Validation_loss','trace_decay']
+                    results = [seqlen,steps,dni_scale,n_in,n_hidden,n_out,
+                               loss,dni_err,dldp_l2,dniJ_l2,val_loss,trace_decay]
+                    log_results(filename,header,results)
+                    # make graphs
+                    graph.make_all(filename,'trace_decay')
+        else:
+            print('unknown model type')
             
             
             

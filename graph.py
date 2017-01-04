@@ -100,7 +100,7 @@ def make_graph(csvfile,metric,title,saveto,rows_to_plot=[],hyperparam_idx=0):
     file.close()
 
 
-def make_all(csvfile,hyperparam_idx=0):    
+def make_all(csvfile,hyperparam_toplot=0):    
     # open the file
     if not csvfile[-4:]=='.csv':
         csvfile = csvfile+'.csv'
@@ -111,6 +111,10 @@ def make_all(csvfile,hyperparam_idx=0):
     categories = reader.next()
     file.close()
     
+    # find hyperparam to plot
+    if type(hyperparam_toplot) is str:
+        hyperparam_toplot = categories.index(hyperparam_toplot)
+    
     # check which columns are plottable data
     is_data = _isplottable(csvfile)
     categories = [c for i,c in enumerate(categories) if is_data[i]]
@@ -118,7 +122,7 @@ def make_all(csvfile,hyperparam_idx=0):
     # loop through everything and make all the graphs
     for metric in categories:
         make_graph(csvfile,metric,title=metric,saveto=csvfile[:-4]+'_'+metric,
-                   hyperparam_idx=hyperparam_idx)
+                   hyperparam_idx=hyperparam_toplot)
 
 
 

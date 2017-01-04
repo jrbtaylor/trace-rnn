@@ -1230,27 +1230,15 @@ class gru_trace(object):
                                outputs=loss)
 
 
-def adamtrace(lr,params,grads,mean,var,t,b1=0.9,b2=0.999):
-    # default value
-    epsilon = 1e-8
-    
-    updates = []
-    for p,g,m,v in zip(params,grads,mean,var):
-        mhat = m/(1-b1**t)
-        vhat = v/(1-b2**t)
-        updates.append((p,p-lr*mhat/(T.sqrt(vhat)+epsilon)))
-    
-    return updates
-
-
-class lstm_adamtrace(object):
+class lstm_trace(object):
     def __init__(self,n_in,n_hidden,n_out,steps,
-                 norm=True,rng=rng):
+                 norm=True,l1_act=0,rng=rng):
         self.n_in = n_in
         self.n_hidden = n_hidden
         self.n_out = n_out
         self.steps = steps
         self.norm = norm
+        self.l1_act = l1_act
         
         # initialize weights
         def ortho_weight(ndim,rng=rng):
@@ -1262,35 +1250,32 @@ class lstm_adamtrace(object):
             return rng.uniform(low=-limit,high=limit,size=(n1,n2)).astype(theano.config.floatX)
         def const_bias(n,value=0):
             return value*numpy.ones((n,),dtype=theano.config.floatX)
-        self.Wxo = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
-        self.Wxf = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        
         self.Wxi = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Wxf = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
+        self.Wxo = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
         self.Wxg = theano.shared(uniform_weight(n_in,n_hidden),borrow=True)
-        self.Wx = T.concatenate([self.Wxo,self.Wxf,self.Wxi,self.Wxg],
+        self.Wx = T.concatenate([self.Wxi,self.Wxf,self.Wxo,self.Wxg],
                                 axis=1)
-        self.Who = theano.shared(ortho_weight(n_hidden,rng),borrow=True)
-        self.Whf = theano.shared(ortho_weight(n_hidden,rng),borrow=True)
         self.Whi = theano.shared(ortho_weight(n_hidden,rng),borrow=True)
+        self.Whf = theano.shared(ortho_weight(n_hidden,rng),borrow=True)
+        self.Who = theano.shared(ortho_weight(n_hidden,rng),borrow=True)
         self.Whg = theano.shared(ortho_weight(n_hidden,rng),borrow=True)
-        self.Wh = T.concatenate([self.Who,self.Whf,self.Whi,self.Whg],
+        self.Wh = T.concatenate([self.Whi,self.Whf,self.Who,self.Whg],
                                 axis=1)
         self.Wy = theano.shared(uniform_weight(n_hidden,n_out),borrow=True)
         
-        self.bo = theano.shared(const_bias(n_hidden,-1),borrow=True)
+        self.bi = theano.shared(const_bias(n_hidden,-1),borrow=True)
         self.bf = theano.shared(const_bias(n_hidden,1),borrow=True)
-        self.bi = theano.shared(const_bias(n_hidden,1),borrow=True)
+        self.bo = theano.shared(const_bias(n_hidden,1),borrow=True)
         self.bg = theano.shared(const_bias(n_hidden,0),borrow=True)
-        self.b = T.concatenate([self.bo,self.bf,self.bi,self.bg],axis=0)
+        self.b = T.concatenate([self.bi,self.bf,self.bo,self.bg],axis=0)
         self.by = theano.shared(const_bias(n_out,0),borrow=True)
         
         self.params = [self.Wx,self.Wh,self.Wy,self.b,self.by]
         self.W = [self.Wx,self.Wh,self.Wy]
         self.L1 = numpy.sum([abs(w).sum() for w in self.W])
         self.L2 = numpy.sum([(w**2).sum() for w in self.W])
-        
-        # params not on the recurrent path do not use the trace
-        self.trace_params = [self.Wx,self.Wh]
-        self.non_trace_params = [self.Wy,self.by,self.b]
         
         if self.norm:
             # because of bias right after, no need for shifts 1 and 2
@@ -1311,6 +1296,11 @@ class lstm_adamtrace(object):
         
         # initialize DNI
         self.dni = dni(n_hidden,2*n_hidden,2)
+        
+        # not all variables get activation trace updates
+        self.trace_params = [self.Wxi,self.Wxf,self.Wxo,self.Wxg,
+                             self.Whi,self.Whf,self.Who,self.Whg]
+        self.non_trace_params = [p for p in self.params if p not in self.trace_params]
     
     # slice for doing step calculations in parallel
     def _slice(self,x,n):
@@ -1321,17 +1311,22 @@ class lstm_adamtrace(object):
         y = T.tensor3('y')
         learning_rate = T.scalar('learning_rate')
         dni_scale = T.scalar('dni_scale')
+        trace_decay = T.scalar('trace_decay')
         
-        # re-initialize the activation traces
-        mean_x = theano.shared(numpy.zeros((4*self.n_hidden),dtype=theano.config.floatX))
-        var_x = theano.shared(numpy.zeros((4*self.n_hidden),dtype=theano.config.floatX))
-        mean_h = theano.shared(numpy.zeros((4*self.n_hidden),dtype=theano.config.floatX))
-        var_h = theano.shared(numpy.zeros((4*self.n_hidden),dtype=theano.config.floatX))
-        time = theano.shared(numpy.zeros((1),dtype=theano.config.floatX))
+        # re-initialize activation traces
+        def floatX(data):
+            return numpy.asarray(data,dtype=theano.config.floatX)
+        trace_xi = theano.shared(self.Wxi.get_value()*floatX(0.))
+        trace_xf = theano.shared(self.Wxf.get_value()*floatX(0.))
+        trace_xo = theano.shared(self.Wxo.get_value()*floatX(0.))
+        trace_xg = theano.shared(self.Wxg.get_value()*floatX(0.))
+        trace_hi = theano.shared(self.Whi.get_value()*floatX(0.))
+        trace_hf = theano.shared(self.Whf.get_value()*floatX(0.))
+        trace_ho = theano.shared(self.Who.get_value()*floatX(0.))
+        trace_hg = theano.shared(self.Whg.get_value()*floatX(0.))
         
-        # default values for adam
-        b1 = 0.9
-        b2 = 0.999
+        # small constant to avoid dividing by zero
+        eps = 1e-8
         
         # reshape the inputs
         # batch x time x n -> time//steps x steps x batch x n
@@ -1346,29 +1341,31 @@ class lstm_adamtrace(object):
         # step takes a set of inputs over self.steps time-steps
         def step(x_t,y_t,c_tmT,h_tmT,
                  Wx,Wh,Wy,b,by,
-                 lr,scale,mx,vx,mh,vh,t):
+                 lr,scale,
+                 Txi,Txf,Txo,Txg,Thi,Thf,Tho,Thg,decay):
             
             # manually build the graph for the inner loop
             yo_t = []
             c_tm1 = c_tmT
             h_tm1 = h_tmT
             loss = 0
-            # copy the old trace values to pass updates
-            mx_old = mx
-            vx_old = vx
-            mh_old = mh
-            vh_old = vh
-            t_old = t
-            t = t+1
+            oldTxi = Txi
+            oldTxf = Txf
+            oldTxo = Txo
+            oldTxg = Txg
+            oldThi = Thi
+            oldThf = Thf
+            oldTho = Tho
+            oldThg = Thg
             for t in range(self.steps):
                 if self.norm:
-                    preact_x = layer_norm(T.dot(x_t[t],Wx),self.scalex)
-                    preact_h = layer_norm(T.dot(h_tm1,Wh),self.scaleh)
-                    preact = preact_x+preact_h+b
+                    xWx = layer_norm(T.dot(x_t[t],Wx),self.scalex)
+                    hWh = layer_norm(T.dot(h_tm1,Wh),self.scaleh)
+                    preact = xWx+hWh+b
                 else:
-                    preact_x = T.dot(x_t[t],Wx)
-                    preact_h = T.dot(h_tm1,Wh)
-                    preact = preact_x+preact_h+b
+                    xWx = T.dot(x_t[t],Wx)
+                    hWh = T.dot(h_tm1,Wh)
+                    preact = xWx+hWh+b
                 i = sigmoid(self._slice(preact,0))
                 f = sigmoid(self._slice(preact,1))
                 o = sigmoid(self._slice(preact,2))
@@ -1383,11 +1380,22 @@ class lstm_adamtrace(object):
                 c_tm1 = c_t
                 h_tm1 = h_t
                 loss += T.mean(categorical_crossentropy(output,y_t[t]))
-                # update the traces
-                mx = b1*mx_old+(1-b1)*T.mean(preact_x,axis=0,keepdims=True)
-                vx = b2*vx_old+(1-b2)*T.var(preact_x,axis=0,keepdims=True)
-                mh = b1*mh_old+(1-b1)*T.mean(preact_h,axis=0,keepdims=True)
-                vh = b2*vh_old+(1-b2)*T.var(preact_h,axis=0,keepdims=True)
+                if self.l1_act>0:
+                    # L1 activation norm = 1 implies only 1 unit is active
+                    # when layer norm is used, so instead allow a higher L1norm
+                    # say, some fraction of n_hidden
+                    loss += self.l1_act*T.mean(T.abs_(T.sum(T.abs_(c_t),axis=1) \
+                                                      -T.sqrt(0.5*self.n_hidden)))
+                def trace_incr(act):
+                    return T.mean(T.abs_(act),axis=0,keepdims=True)/T.mean(T.abs_(act))
+                Txi = decay*Txi+trace_incr(self._slice(xWx,0))
+                Txf = decay*Txf+trace_incr(self._slice(xWx,1))
+                Txo = decay*Txo+trace_incr(self._slice(xWx,2))
+                Txg = decay*Txg+trace_incr(self._slice(xWx,3))
+                Thi = decay*Thi+trace_incr(self._slice(hWh,0))
+                Thf = decay*Thf+trace_incr(self._slice(hWh,1))
+                Tho = decay*Tho+trace_incr(self._slice(hWh,2))
+                Thg = decay*Thg+trace_incr(self._slice(hWh,3))
             
             loss = loss/self.steps # to take mean
             up_dldp_l2 = 0
@@ -1396,38 +1404,60 @@ class lstm_adamtrace(object):
             dni_out = self.dni.output(h_t)
             dni_out_h = self._slice(dni_out,0)
             dni_out_c = self._slice(dni_out,1)
-            # params to need to be in same order as grads 
-            adam_grads = []
-            adam_params = []
-            # note: trace params are in order ofig, otherwise need to slice
-            tracex_grads = []
-            traceh_grads = []
-            # output weights don't have dni feedback or trace
+            grads = []
+            params = []
+            # need some way of scaling traces
+            def normalize_trace(trace):
+                return (trace+eps)/(T.mean(trace)+eps)
+            # output weights don't have dni feedback
             for param in [self.Wy,self.by]:
                 dlossdparam = T.grad(loss,param)
-                adam_grads.append(dlossdparam)
-                adam_params.append(param)
-            # output-gate weights get dni_h
-            def synthgrad(param,dnio):
-                return T.grad(loss,param)+scale*T.Lop(h_t,param,dnio)
-            adam_grads.append(synthgrad(self.bo,dni_out_h))
-            adam_params.append(self.bo)
-            tracex_grads.append(synthgrad(self.Wxo,dni_out_h))
-            traceh_grads.append(synthgrad(self.Who,dni_out_h))
-            # all other gates get dni_c
-            dni_c_notrace_params = [self.bf,self.bi,self.bg]
+                grads.append(dlossdparam)
+                params.append(param)
+            # output-gate bias gets dni_h but no trace
+            for param in [self.bo]:
+                dlossdparam = T.grad(loss,param)
+                dniJ = T.Lop(h_t,param,dni_out_h)
+                grads.append(dlossdparam+scale*dniJ)
+                params.append(param)
+                up_dldp_l2 += T.sum(T.square(dlossdparam))
+                up_dni_l2 += T.sum(T.square(dniJ))
+            # output-gate weights get dni_h and trace
+            dni_h_params = [self.Wxo,self.Who]
+            dni_h_traces = [Txo,Tho]
+            for param,trace in zip(dni_h_params,dni_h_traces):
+                trace_scale = normalize_trace(trace)
+                dlossdparam = T.grad(loss,param)
+                dniJ = T.Lop(h_t,param,dni_out_h)
+                grads.append(trace_scale*(dlossdparam+scale*dniJ))
+                params.append(param)
+                up_dldp_l2 += T.sum(T.square(dlossdparam))
+                up_dni_l2 += T.sum(T.square(dniJ))
+            # other biases (and normalization params) get dni_c but no trace
+            dni_c_params = [self.bi,self.bf,self.bg]
             if self.norm:
-                dni_c_notrace_params = dni_c_notrace_params + [self.scalex,
-                                                               self.scaleh,
-                                                               self.scalec,
-                                                               self.shiftc]
-            for param in dni_c_notrace_params:
-                adam_grads.append(synthgrad(param,dni_out_c))
-                adam_params.append(param)
-            for param in [self.Wxf,self.Wxi,self.Wxg]:
-                tracex_grads.append(synthgrad(param,dni_out_c))
-            for param in [self.Whf,self.Whi,self.Whg]:
-                traceh_grads.append(synthgrad(param,dni_out_c))
+                dni_c_params = dni_c_params + [self.scalex,self.scaleh,
+                                               self.scalec,self.shiftc]
+            for param in dni_c_params:
+                dlossdparam = T.grad(loss,param)
+                dniJ = T.Lop(h_t,param,dni_out_c)
+                grads.append(dlossdparam+scale*dniJ)
+                params.append(param)
+                up_dldp_l2 += T.sum(T.square(dlossdparam))
+                up_dni_l2 += T.sum(T.square(dniJ))
+            # all other weights get dni_c and trace
+            dni_c_params = [self.Wxi,self.Wxf,self.Wxg,
+                            self.Whi,self.Whf,self.Whg]
+            dni_c_traces = [Txi,Txf,Txg,Thi,Thf,Thg]
+            for param,trace in zip(dni_c_params,dni_c_traces):
+                trace_scale = normalize_trace(trace)
+                dlossparam = T.grad(loss,param)
+                dniJ = T.Lop(c_t,param,dni_out_c)
+                grads.append(trace_scale*(dlossparam+scale*dniJ))
+                params.append(param)
+                up_dldp_l2 += T.sum(T.square(dlossdparam))
+                up_dni_l2 += T.sum(T.square(dniJ))
+            
             # Update the DNI (from the last step)
             # recalculate the DNI prediction since it can't be passed
             dni_out_old = self.dni.output(h_tmT)
@@ -1441,13 +1471,17 @@ class lstm_adamtrace(object):
             dni_error = T.sum(T.square(dni_old_h-dni_target_h)) \
                         +T.sum(T.square(dni_old_c-dni_target_c))
             for param in self.dni.params:
-                adam_grads.append(T.grad(dni_error,param))
-                adam_params.append(param)
+                grads.append(T.grad(dni_error,param))
             
-            updates = adam(lr,adam_params,adam_grads)
-            updates.append(adamtrace(lr,self.Wx,tracex_grads,mx,vx,t))
-            updates.append(adamtrace(lr,self.Wh,traceh_grads,mh,vh,t))
-            updates.append([(mx_old,mx),(vx_old,vx),(mh_old,mh),(vh_old,vh),(t_old,t)])
+            updates = adam(lr,params+self.dni.params,grads)
+            updates.append((oldTxi,Txi))
+            updates.append((oldTxf,Txf))
+            updates.append((oldTxo,Txo))
+            updates.append((oldTxg,Txg))
+            updates.append((oldThi,Thi))
+            updates.append((oldThf,Thf))
+            updates.append((oldTho,Tho))
+            updates.append((oldThg,Thg))
             
             return [c_t,h_t,loss,dni_error,
                     T.sqrt(up_dldp_l2),T.sqrt(up_dni_l2)],updates
@@ -1464,8 +1498,10 @@ class lstm_adamtrace(object):
                                 non_sequences=[self.Wx,self.Wh,self.Wy,
                                                self.b,self.by,
                                                learning_rate,dni_scale,
-                                               mean_x,var_x,mean_h,var_h,time])
-        return theano.function(inputs=[x,y,learning_rate,dni_scale],
+                                               trace_xi,trace_xf,trace_xo,trace_xg,
+                                               trace_hi,trace_hf,trace_ho,trace_hg,
+                                               trace_decay])
+        return theano.function(inputs=[x,y,learning_rate,dni_scale,trace_decay],
                                outputs=[T.mean(seq_loss),
                                         T.mean(seq_dni_error),
                                         T.mean(up_dldp),
@@ -1506,6 +1542,8 @@ class lstm_adamtrace(object):
         loss = T.mean(loss)
         return theano.function(inputs=[x,y],
                                outputs=loss)
+
+
 
 
         

@@ -175,10 +175,12 @@ def test_lstm_dni(n_in,n_hidden,n_out,dni_steps,dni_scale,
     return experiment(train,lr,lr_decay,dni_scale,batch_size,
                       test,n_train,n_val,patience)
 
-def test_lstm_adamtrace(n_in,n_hidden,n_out,dni_steps,dni_scale,
+def test_lstm_trace(n_in,n_hidden,n_out,dni_steps,dni_scale,
                   lr,lr_decay,n_train,n_val,batch_size,patience):
-    model = recurrent.lstm_adamtrace(n_in,n_hidden,n_out,dni_steps)
-    train = model.train()
+    model = recurrent.lstm_trace(n_in,n_hidden,n_out,dni_steps)
+    trace_decay = 0.9
+    model_train = model.train()
+    train = lambda x,y,l,d: model_train(x,y,l,d,trace_decay)
     test = model.test()
     return experiment(train,lr,lr_decay,dni_scale,batch_size,
                       test,n_train,n_val,patience)
@@ -220,9 +222,9 @@ if __name__ == "__main__":
                 seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
                     test_lstm_dni(n_in,n_hidden,n_out,steps,dni_scale,
                                  lr,lr_decay,n_train,n_val,batch_size,patience)
-            elif model == 'lstm_adamtrace':
+            elif model == 'lstm_trace':
                 seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
-                    test_lstm_adamtrace(n_in,n_hidden,n_out,steps,dni_scale,
+                    test_lstm_trace(n_in,n_hidden,n_out,steps,dni_scale,
                                  lr,lr_decay,n_train,n_val,batch_size,patience)
             else:
                 print('unknown model type')

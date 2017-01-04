@@ -168,17 +168,17 @@ def log_results(filename,line,sequence_length,steps,dni_scale,n_in,n_hidden,n_ou
 
 def test_lstm_dni(n_in,n_hidden,n_out,dni_steps,dni_scale,
                   lr,lr_decay,n_train,n_val,batch_size,patience):
-    model = recurrent.lstm_dni(n_in,n_hidden,n_out,dni_steps,
-                               l1_act=1e-6)
+    model = recurrent.lstm_dni(n_in,n_hidden,n_out,dni_steps)
     train = model.train()
     test = model.test()
     return experiment(train,lr,lr_decay,dni_scale,batch_size,
                       test,n_train,n_val,patience)
 
 def test_lstm_trace(n_in,n_hidden,n_out,dni_steps,dni_scale,
-                  lr,lr_decay,n_train,n_val,batch_size,patience):
-    model = recurrent.lstm_trace(n_in,n_hidden,n_out,dni_steps)
-    trace_decay = 0.9
+                  lr,lr_decay,n_train,n_val,batch_size,patience,
+                  trace_incr,trace_norm,trace_decay):
+    model = recurrent.lstm_trace(n_in,n_hidden,n_out,dni_steps,
+                                 trace_incr=trace_incr,trace_norm=trace_norm)
     model_train = model.train()
     train = lambda x,y,l,d: model_train(x,y,l,d,trace_decay)
     test = model.test()
@@ -222,20 +222,37 @@ if __name__ == "__main__":
                 seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
                     test_lstm_dni(n_in,n_hidden,n_out,steps,dni_scale,
                                  lr,lr_decay,n_train,n_val,batch_size,patience)
+                # log the result
+                filename = model+'_copytest_DNI'+str(steps)
+                log_results(filename,0,seqlen,steps,dni_scale,n_in,n_hidden,
+                            n_out,loss,dni_err,dldp_l2,dniJ_l2,val_loss)
+                # make graphs
+                graph.make_all(filename,2)
             elif model == 'lstm_trace':
-                seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
-                    test_lstm_trace(n_in,n_hidden,n_out,steps,dni_scale,
-                                 lr,lr_decay,n_train,n_val,batch_size,patience)
+                trace_incrs = ['l1','l2','l1_stepnorm','l2_stepnorm',
+                               'l1','l2','l1_stepnorm','l2_stepnorm']
+                trace_norms = ['l1','l2','l1_inv','l2_inv',
+                               'l1_inv','l2_inv','l1','l2']
+                for trace_incr,trace_norm in zip(trace_incrs,trace_norms):
+                    for trace_decay in [0.5,0.9,0.99]:
+                        seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
+                            test_lstm_trace(n_in,n_hidden,n_out,steps,dni_scale,
+                                         lr,lr_decay,n_train,n_val,batch_size,patience,
+                                         trace_incr,trace_norm,trace_decay)
+                        # log the result
+                        filename = model+'_copytest_DNI'+str(steps) \
+                                   +'_incr'+trace_incr+'_norm'+trace_norm \
+                                   +'_decay'+str(trace_decay).replace('.','p')
+                        log_results(filename,0,seqlen,steps,dni_scale,n_in,n_hidden,
+                                    n_out,loss,dni_err,dldp_l2,dniJ_l2,val_loss)
+                        # make graphs
+                        graph.make_all(filename,2)
             else:
                 print('unknown model type')
             
-            # log the result
-            filename = model+'_copytest_DNI'+str(steps)
-            log_results(filename,0,seqlen,steps,dni_scale,n_in,n_hidden,n_out,
-                    loss,dni_err,dldp_l2,dniJ_l2,val_loss)
             
-            # make graphs
-            graph.make_all(filename,2)
+            
+            
 
 
 

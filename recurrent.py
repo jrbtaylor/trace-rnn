@@ -559,13 +559,12 @@ class gru_dni(object):
 
 class lstm_dni(object):
     def __init__(self,n_in,n_hidden,n_out,steps,
-                 norm=True,l1_act=0,rng=rng):
+                 norm=True,rng=rng):
         self.n_in = n_in
         self.n_hidden = n_hidden
         self.n_out = n_out
         self.steps = steps
         self.norm = norm
-        self.l1_act = l1_act
         
         # initialize weights
         def ortho_weight(ndim,rng=rng):
@@ -673,12 +672,6 @@ class lstm_dni(object):
                 c_tm1 = c_t
                 h_tm1 = h_t
                 loss += T.mean(categorical_crossentropy(output,y_t[t]))
-                if self.l1_act>0:
-                    # L1 activation norm = 1 implies only 1 unit is active
-                    # when layer norm is used, so instead allow a higher L1norm
-                    # say, some fraction of n_hidden
-                    loss += self.l1_act*T.mean(T.abs_(T.sum(T.abs_(c_t),axis=1) \
-                                                      -T.sqrt(0.5*self.n_hidden)))
             
             loss = loss/self.steps # to take mean
             up_dldp_l2 = 0
@@ -1232,13 +1225,14 @@ class gru_trace(object):
 
 class lstm_trace(object):
     def __init__(self,n_in,n_hidden,n_out,steps,
-                 norm=True,l1_act=0,rng=rng):
+                 norm=True,trace_incr='l1',trace_norm='l1',rng=rng):
         self.n_in = n_in
         self.n_hidden = n_hidden
         self.n_out = n_out
         self.steps = steps
         self.norm = norm
-        self.l1_act = l1_act
+        self.trace_incr = trace_incr
+        self.trace_norm = trace_norm
         
         # initialize weights
         def ortho_weight(ndim,rng=rng):
@@ -1305,6 +1299,30 @@ class lstm_trace(object):
     # slice for doing step calculations in parallel
     def _slice(self,x,n):
         return x[:,n*self.n_hidden:(n+1)*self.n_hidden]
+    
+    def _trace_increment(self,act):
+        if self.trace_incr=='l1':
+            incr = T.mean(T.abs_(act),axis=0,keepdims=True)
+        elif self.trace_incr=='l2':
+            incr = T.var(act,axis=0,keepdims=True)
+        elif self.trace_incr=='l1_stepnorm':
+            incr = T.mean(T.abs_(act),axis=0,keepdims=True)/T.mean(T.abs_(act))
+        elif self.trace_incr=='l2_stepnorm':
+            incr = T.var(act,axis=0,keepdims=True)/T.var(act)
+        return incr
+    
+    def _normalize_trace(self,trace):
+        # small constant to avoid dividing by zero
+        eps = 1e-8
+        if self.trace_norm=='l1':
+            trace = (trace+eps)/(T.mean(trace)+eps)
+        elif self.trace_norm=='l1_inv':
+            trace = (T.mean(trace)+eps)/(trace+eps)
+        elif self.trace_norm=='l2':
+            trace = (T.sqrt(trace)+eps)/(T.sqrt(T.mean(trace))+eps)
+        elif self.trace_norm=='l2_inv':
+            trace = (T.sqrt(T.mean(trace))+eps)/(T.sqrt(trace)+eps)
+        return trace
         
     def train(self):
         x = T.tensor3('x')
@@ -1324,9 +1342,6 @@ class lstm_trace(object):
         trace_hf = theano.shared(self.Whf.get_value()*floatX(0.))
         trace_ho = theano.shared(self.Who.get_value()*floatX(0.))
         trace_hg = theano.shared(self.Whg.get_value()*floatX(0.))
-        
-        # small constant to avoid dividing by zero
-        eps = 1e-8
         
         # reshape the inputs
         # batch x time x n -> time//steps x steps x batch x n
@@ -1380,40 +1395,34 @@ class lstm_trace(object):
                 c_tm1 = c_t
                 h_tm1 = h_t
                 loss += T.mean(categorical_crossentropy(output,y_t[t]))
-                if self.l1_act>0:
-                    # L1 activation norm = 1 implies only 1 unit is active
-                    # when layer norm is used, so instead allow a higher L1norm
-                    # say, some fraction of n_hidden
-                    loss += self.l1_act*T.mean(T.abs_(T.sum(T.abs_(c_t),axis=1) \
-                                                      -T.sqrt(0.5*self.n_hidden)))
-                def trace_incr(act):
-                    return T.mean(T.abs_(act),axis=0,keepdims=True)/T.mean(T.abs_(act))
-                Txi = decay*Txi+trace_incr(self._slice(xWx,0))
-                Txf = decay*Txf+trace_incr(self._slice(xWx,1))
-                Txo = decay*Txo+trace_incr(self._slice(xWx,2))
-                Txg = decay*Txg+trace_incr(self._slice(xWx,3))
-                Thi = decay*Thi+trace_incr(self._slice(hWh,0))
-                Thf = decay*Thf+trace_incr(self._slice(hWh,1))
-                Tho = decay*Tho+trace_incr(self._slice(hWh,2))
-                Thg = decay*Thg+trace_incr(self._slice(hWh,3))
+
+                Txi = decay*Txi+self._trace_increment(self._slice(xWx,0))
+                Txf = decay*Txf+self._trace_increment(self._slice(xWx,1))
+                Txo = decay*Txo+self._trace_increment(self._slice(xWx,2))
+                Txg = decay*Txg+self._trace_increment(self._slice(xWx,3))
+                Thi = decay*Thi+self._trace_increment(self._slice(hWh,0))
+                Thf = decay*Thf+self._trace_increment(self._slice(hWh,1))
+                Tho = decay*Tho+self._trace_increment(self._slice(hWh,2))
+                Thg = decay*Thg+self._trace_increment(self._slice(hWh,3))
             
             loss = loss/self.steps # to take mean
             up_dldp_l2 = 0
             up_dni_l2 = 0
+            
             # Train the LSTM: backprop (loss + DNI output)
+            # -----------------------------------------------------------------
             dni_out = self.dni.output(h_t)
             dni_out_h = self._slice(dni_out,0)
             dni_out_c = self._slice(dni_out,1)
             grads = []
             params = []
-            # need some way of scaling traces
-            def normalize_trace(trace):
-                return (trace+eps)/(T.mean(trace)+eps)
+            
             # output weights don't have dni feedback
             for param in [self.Wy,self.by]:
                 dlossdparam = T.grad(loss,param)
                 grads.append(dlossdparam)
                 params.append(param)
+                
             # output-gate bias gets dni_h but no trace
             for param in [self.bo]:
                 dlossdparam = T.grad(loss,param)
@@ -1422,17 +1431,19 @@ class lstm_trace(object):
                 params.append(param)
                 up_dldp_l2 += T.sum(T.square(dlossdparam))
                 up_dni_l2 += T.sum(T.square(dniJ))
+                
             # output-gate weights get dni_h and trace
             dni_h_params = [self.Wxo,self.Who]
             dni_h_traces = [Txo,Tho]
             for param,trace in zip(dni_h_params,dni_h_traces):
-                trace_scale = normalize_trace(trace)
+                trace_scale = self._normalize_trace(trace)
                 dlossdparam = T.grad(loss,param)
                 dniJ = T.Lop(h_t,param,dni_out_h)
                 grads.append(trace_scale*(dlossdparam+scale*dniJ))
                 params.append(param)
                 up_dldp_l2 += T.sum(T.square(dlossdparam))
                 up_dni_l2 += T.sum(T.square(dniJ))
+                
             # other biases (and normalization params) get dni_c but no trace
             dni_c_params = [self.bi,self.bf,self.bg]
             if self.norm:
@@ -1445,12 +1456,13 @@ class lstm_trace(object):
                 params.append(param)
                 up_dldp_l2 += T.sum(T.square(dlossdparam))
                 up_dni_l2 += T.sum(T.square(dniJ))
+                
             # all other weights get dni_c and trace
             dni_c_params = [self.Wxi,self.Wxf,self.Wxg,
                             self.Whi,self.Whf,self.Whg]
             dni_c_traces = [Txi,Txf,Txg,Thi,Thf,Thg]
             for param,trace in zip(dni_c_params,dni_c_traces):
-                trace_scale = normalize_trace(trace)
+                trace_scale = self._normalize_trace(trace)
                 dlossparam = T.grad(loss,param)
                 dniJ = T.Lop(c_t,param,dni_out_c)
                 grads.append(trace_scale*(dlossparam+scale*dniJ))
@@ -1459,6 +1471,7 @@ class lstm_trace(object):
                 up_dni_l2 += T.sum(T.square(dniJ))
             
             # Update the DNI (from the last step)
+            # -----------------------------------------------------------------
             # recalculate the DNI prediction since it can't be passed
             dni_out_old = self.dni.output(h_tmT)
             dni_old_h = self._slice(dni_out_old,0)
@@ -1472,8 +1485,9 @@ class lstm_trace(object):
                         +T.sum(T.square(dni_old_c-dni_target_c))
             for param in self.dni.params:
                 grads.append(T.grad(dni_error,param))
+                params.append(param)
             
-            updates = adam(lr,params+self.dni.params,grads)
+            updates = adam(lr,params,grads)
             updates.append((oldTxi,Txi))
             updates.append((oldTxf,Txf))
             updates.append((oldTxo,Txo))

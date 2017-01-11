@@ -146,26 +146,6 @@ def experiment(train_fcn,lr,lr_decay,dni_scale,batch_size,
     
     return seqlens, loss, dni_err, dldp_l2, dniJ_l2, val_loss
 
-#def log_results(filename,line,sequence_length,steps,dni_scale,n_in,n_hidden,n_out,
-#                loss,dni_err,dldp_l2,dniJ_l2,val_loss,overwrite=False):
-#        import csv
-#        import os
-#        if not filename[-4:]=='.csv':
-#            filename = filename+'.csv'
-#        if line==0 and overwrite:
-#            # check if old log exists and delete
-#            if os.path.isfile(filename):
-#                os.remove(filename)
-#        file = open(filename,'a')
-#        writer = csv.writer(file)
-#        if line==0:
-#            writer.writerow(('sequence_length','DNI_steps','DNI_scale',
-#                             'n_in','n_hidden','n_out',
-#                             'Training_loss','DNI_err',
-#                             '|dldp|','|dniJ|','Validation_loss'))
-#        writer.writerow((sequence_length,steps,dni_scale,n_in,n_hidden,n_out,
-#                         loss,dni_err,dldp_l2,dniJ_l2,val_loss))
-
 def log_results(filename,header,results):
     import csv
     import os
@@ -208,6 +188,14 @@ def test_lstm_trace(n_in,n_hidden,n_out,dni_steps,dni_scale,
                                  trace_incr=trace_incr,trace_norm=trace_norm)
     model_train = model.train()
     train = lambda x,y,l,d: model_train(x,y,l,d,trace_decay)
+    test = model.test()
+    return experiment(train,lr,lr_decay,dni_scale,batch_size,
+                      test,n_train,n_val,patience)
+
+def test_hgornn(n_in,n_hidden,n_out,dni_steps,dni_scale,
+                  lr,lr_decay,n_train,n_val,batch_size,patience):
+    model = recurrent.hypergated_rnn(n_in,n_hidden,n_out,dni_steps)
+    train = model.train()
     test = model.test()
     return experiment(train,lr,lr_decay,dni_scale,batch_size,
                       test,n_train,n_val,patience)
@@ -267,10 +255,12 @@ if __name__ == "__main__":
             # this experiment is to find how we want to increment and normalize
             # the activation traces, assuming the dni already works and helps
             dni_scale = 0.1
-            trace_incrs = ['l1','l2','l1_step','l2_step',
-                           'l1','l2','l1_step','l2_step']
-            trace_norms = ['l1','l2','l1_inv','l2_inv',
-                           'l1_inv','l2_inv','l1','l2']
+            trace_incrs = ['l1']
+            trace_norms = ['l1_inv']
+#            trace_incrs = ['l1','l2','l1_step','l2_step',
+#                           'l1','l2','l1_step','l2_step']
+#            trace_norms = ['l1','l2','l1_inv','l2_inv',
+#                           'l1_inv','l2_inv','l1','l2']
             for trace_incr,trace_norm in zip(trace_incrs,trace_norms):
                 for trace_decay in [0.5,0.9,0.99]:
                     seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
@@ -289,6 +279,21 @@ if __name__ == "__main__":
                     log_results(filename,header,results)
                     # make graphs
                     graph.make_all(filename,'trace_decay')
+        elif model == 'hypergated_rnn':
+            dni_scale = 0.1
+            seqlen,loss,dni_err,dldp_l2,dniJ_l2,val_loss = \
+                        test_hgornn(n_in,n_hidden,n_out,steps,dni_scale,
+                                     lr,lr_decay,n_train,n_val,batch_size,patience)
+            filename = model+'_copytest_DNI'+str(steps)
+            header = ['sequence_length','DNI_steps','DNI_scale',
+                     'n_in','n_hidden','n_out',
+                     'Training_loss','DNI_err',
+                     '|dldp|','|dniJ|','Validation_loss']
+            results = [seqlen,steps,dni_scale,n_in,n_hidden,n_out,
+                       loss,dni_err,dldp_l2,dniJ_l2,val_loss]
+            log_results(filename,header,results)
+            # make graphs
+            graph.make_all(filename,'DNI_steps')
         else:
             print('unknown model type')
             
